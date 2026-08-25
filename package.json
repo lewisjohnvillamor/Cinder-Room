@@ -14,7 +14,6 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/media-credentials.test.mjs tests/mobile-layout.test.mjs tests/theme-contrast.test.mjs tests/relay-parity-static.test.mjs",
     "lint": "bash scripts/sites-env.sh -- eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern self-host-dist --ignore-pattern server-dist",
-    "db:generate": "bash scripts/sites-env.sh -- drizzle-kit generate",
     "build:room-ui": "esbuild server/client-entry.tsx --bundle --format=esm --minify --outfile=self-host-dist/app.js --conditions=style && esbuild server/e2ee-worker-entry.ts --bundle --format=esm --minify --outfile=self-host-dist/e2ee-worker.js",
     "build:relay": "esbuild server/index.ts --bundle --platform=node --format=cjs --minify --outfile=server-dist/index.cjs",
     "room": "npm run build:room-ui && node scripts/run-room.mjs",
@@ -26,7 +25,6 @@
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
-    "drizzle-orm": "0.45.2",
     "express": "^5.2.1",
     "livekit-client": "^2.22.0",
     "next": "16.2.6",
@@ -44,7 +42,6 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
-    "drizzle-kit": "0.31.10",
     "esbuild": "^0.28.2",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",

@@ -26,8 +26,6 @@ Create an Ubuntu 24.04 Droplet with SSH-key authentication. Choose a region clos
 
 DigitalOcean signup/referral: <https://m.do.co/c/2b70ddbc175d>
 
-[![DigitalOcean Referral Badge](https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%201.svg)](https://www.digitalocean.com/?refcode=2b70ddbc175d&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge)
-
 ## 2. Point two DNS names at the Droplet
 
 Create two `A` records using the Droplet's public IPv4 address:

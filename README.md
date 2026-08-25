@@ -56,7 +56,7 @@ The production image contains the compiled Rust relay, static browser assets, CA
 cloudflared tunnel --url http://localhost:3000
 ```
 
-Append the host URL's `/room/<room-id>#o=<owner-token>` suffix to the generated HTTPS origin. Cloudflare Quick Tunnels are convenient and free, but intended for development/testing rather than a production SLA.
+Append the host URL's `/room/<room-id>#o=<owner-token>` suffix to the generated HTTPS origin. Cloudflare Quick Tunnels are convenient and free. They do not require a Cloudflare account, API token, DNS record, or domain, but they use a temporary random `*.trycloudflare.com` address and are intended only for testing and short-lived rooms. A stable named tunnel requires a Cloudflare account and a domain using Cloudflare DNS.
 
 ## Rust parity
 
@@ -88,7 +88,7 @@ flowchart TD
 ```
 
 - An Onion Service supplies its own `.onion` address; no domain or router port-forward is required.
-- People without Tor Browser use an HTTPS route: a temporary Cloudflare Tunnel or a domain pointed at their own VPS.
+- People without Tor Browser use an HTTPS route: an account-free temporary Quick Tunnel, a named Cloudflare Tunnel, or a domain pointed at their own VPS.
 - The routes receive the same opaque ciphertext. One route does not proxy through the other.
 - Tor is useful for chat and modest file transfer but is generally unsuitable for low-latency group video.
 
@@ -129,8 +129,6 @@ The included [`deploy/digitalocean`](deploy/digitalocean/README.md) bundle runs 
 A 1 GB instance is suitable only for evaluation or very small calls; a 2 GB instance is a safer small-room baseline. Software is free/open source, but the VPS, domain, and outbound bandwidth may cost money.
 
 [DigitalOcean referral link](https://m.do.co/c/2b70ddbc175d)
-
-[![DigitalOcean Referral Badge](https://web-platforms.sfo2.cdn.digitaloceans.com/WWW/Badge%201.svg)](https://www.digitalocean.com/?refcode=2b70ddbc175d&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge)
 
 ## Capacity and guardrails
 
