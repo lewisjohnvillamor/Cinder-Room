@@ -45,5 +45,6 @@ next-env.d.ts
 /work/
 /rust-server/target/
 /self-host-dist/
+/.cinder-bin/
 *.tsbuildinfo
 /.openai/

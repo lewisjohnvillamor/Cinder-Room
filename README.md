@@ -24,7 +24,7 @@ Run one temporary, self-hosted room and share its capability link. Cinder Room p
 
 ## Start locally
 
-Requirements: Node.js 22.13+, npm, and Rust 1.94. Optional route helpers are `tor` and `cloudflared`; optional native group media uses `livekit-server`.
+Requirements: Node.js 22.13+, npm, and Rust 1.94. Optional route helpers are `tor` and `cloudflared`; Cinder can download `cloudflared` automatically on first start when `CINDER_ROUTES` includes Cloudflare. Optional native group media uses `livekit-server`.
 
 ```bash
 git clone https://github.com/lewisjohnvillamor/Cinder-Room.git
@@ -160,6 +160,7 @@ Copy `.env.example` to `.env` or export variables before starting:
 | `PORT` | `3000` | Relay port |
 | `CINDER_BIND` | `127.0.0.1` | Listener; containers set `0.0.0.0` |
 | `CINDER_ROUTES` | `both` | `both`, `tor`, `cloudflare`, or `local` |
+| `CINDER_AUTO_INSTALL_CLOUDFLARED` | `true` | Download `cloudflared` into `.cinder-bin/` when Cloudflare routing is enabled and the binary is missing |
 | `CINDER_RELAY` | `rust` | `rust` or `node` |
 | `ROOM_TTL_MINUTES` | `180` | Automatic room shutdown |
 | `MAX_PARTICIPANTS` | `50` | Connection ceiling |
@@ -201,4 +202,4 @@ Security reports should avoid public disclosure until a fix is available. Contac
 
 Copyright © 2026 Lewis John Villamor. Licensed under [GNU GPL v3 or later](LICENSE).
 
-[Buy Lewis a coffee via PayPal](https://www.paypal.com/paypalme/lewisjohnvillamor/300)
+[Buy Lewis a coffee via PayPal](https://www.paypal.com/paypalme/lewisjohnvillamor/250)

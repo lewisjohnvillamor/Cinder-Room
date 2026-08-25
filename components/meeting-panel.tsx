@@ -154,7 +154,7 @@ export default function MeetingPanel({
   onModerate,
 }: {
   open: boolean;
-  intent: "video" | "present";
+  intent: "video" | "audio" | "present";
   roomId: string;
   roomKey: CryptoKey;
   encodedKey: string;
@@ -198,6 +198,7 @@ export default function MeetingPanel({
   const [questionDraft, setQuestionDraft] = useState("");
   const [pollDraft, setPollDraft] = useState("");
   const [captionsOn, setCaptionsOn] = useState(false);
+  const [captionsConfirmOpen, setCaptionsConfirmOpen] = useState(false);
 
   const refresh = useCallback(async (room: Room) => {
     const participants: Participant[] = [room.localParticipant, ...room.remoteParticipants.values()];
@@ -225,6 +226,17 @@ export default function MeetingPanel({
     let cancelled = false;
     const prepare = async () => {
       try {
+        if (intent === "audio") {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          if (cancelled) { stream.getTracks().forEach((track) => track.stop()); return; }
+          previewStreamRef.current?.getTracks().forEach((track) => track.stop());
+          previewStreamRef.current = stream;
+          const listed = await navigator.mediaDevices.enumerateDevices();
+          setDevices(listed);
+          if (!microphoneDevice) setMicrophoneDevice(listed.find((item) => item.kind === "audioinput")?.deviceId ?? "");
+          if (!speakerDevice) setSpeakerDevice(listed.find((item) => item.kind === "audiooutput")?.deviceId ?? "");
+          return;
+        }
         const stream = await navigator.mediaDevices.getUserMedia({
           video: cameraDevice ? { deviceId: { exact: cameraDevice } } : true,
           audio: false,
@@ -242,7 +254,7 @@ export default function MeetingPanel({
     };
     void prepare();
     return () => { cancelled = true; previewStreamRef.current?.getTracks().forEach((track) => track.stop()); previewStreamRef.current = null; };
-  }, [cameraDevice, connected, microphoneDevice, open, speakerDevice]);
+  }, [cameraDevice, connected, intent, microphoneDevice, open, speakerDevice]);
 
   useEffect(() => {
     if (moderationCommand?.command !== "mute") return;
@@ -309,6 +321,14 @@ export default function MeetingPanel({
       previewStreamRef.current = null;
       roomRef.current = room;
       setConnected(true);
+      if (intent === "audio") {
+        await room.localParticipant.setMicrophoneEnabled(true, {
+          ...(microphoneDevice ? { deviceId: microphoneDevice } : {}),
+          echoCancellation: true,
+          noiseSuppression,
+          autoGainControl: true,
+        });
+      }
       await refresh(room);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The encrypted media connection failed.");
@@ -397,20 +417,13 @@ export default function MeetingPanel({
     catch { setError("Picture-in-picture is unavailable in this browser."); }
   }
 
-  function toggleCaptions() {
-    if (captionsOn) {
-      recognitionRef.current?.stop();
-      recognitionRef.current = null;
-      setCaptionsOn(false);
-      return;
-    }
+  function startCaptions() {
     const constructors = window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionLike;
       webkitSpeechRecognition?: new () => SpeechRecognitionLike;
     };
     const Recognition = constructors.SpeechRecognition ?? constructors.webkitSpeechRecognition;
     if (!Recognition) { setError("Live captions are not supported by this browser."); return; }
-    if (!window.confirm("Browser captions may send microphone audio to your browser vendor's speech service. Caption text is encrypted by Cinder, but recognition may not be local. Enable captions?")) return;
     const recognition = new Recognition();
     recognition.continuous = true;
     recognition.interimResults = false;
@@ -425,6 +438,16 @@ export default function MeetingPanel({
     recognitionRef.current = recognition;
     recognition.start();
     setCaptionsOn(true);
+  }
+
+  function toggleCaptions() {
+    if (captionsOn) {
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+      setCaptionsOn(false);
+      return;
+    }
+    setCaptionsConfirmOpen(true);
   }
 
   if (!open) return null;
@@ -454,27 +477,34 @@ export default function MeetingPanel({
         <header className="meeting-toolbar">
           <div>
             <p className="eyebrow"><span className={`status-dot ${connected ? "" : "offline"}`} /> Encrypted group media</p>
-            <h2 id="meeting-title">{presenter ? `${presenter.name} is presenting` : "Camera, microphone & screen"}</h2>
+            <h2 id="meeting-title">{presenter ? `${presenter.name} is presenting` : intent === "audio" ? "Encrypted voice call" : "Camera, microphone & screen"}</h2>
           </div>
           <button className="icon-button" aria-label="Minimize meeting" onClick={onMinimize}><X size={18} /></button>
         </header>
 
         {!connected ? (
           <div className="meeting-prejoin">
-            <div className="prejoin-preview">
-              <video ref={previewRef} autoPlay playsInline muted />
-              <span><LockKey size={14} /> Preview stays on this device</span>
-            </div>
-            <h3>{intent === "present" ? "Join, then share your screen." : "Join the encrypted video room."}</h3>
-            <p>Cameras and microphones remain off until you enable them. Screen, camera, and microphone tracks can run at the same time.</p>
+            {intent !== "audio" ? (
+              <div className="prejoin-preview">
+                <video ref={previewRef} autoPlay playsInline muted />
+                <span><LockKey size={14} /> Preview stays on this device</span>
+              </div>
+            ) : (
+              <div className="prejoin-preview audio-preview">
+                <Microphone size={34} weight="duotone" />
+                <span><LockKey size={14} /> Microphone stays encrypted on this device</span>
+              </div>
+            )}
+            <h3>{intent === "present" ? "Join, then share your screen." : intent === "audio" ? "Join the encrypted voice call." : "Join the encrypted video room."}</h3>
+            <p>{intent === "audio" ? "Your microphone turns on when you join. Camera stays off unless you enable it later." : "Cameras and microphones remain off until you enable them. Screen, camera, and microphone tracks can run at the same time."}</p>
             <div className="device-grid">
-              <label>Camera<select value={cameraDevice} onChange={(event) => void switchDevice("videoinput", event.target.value)}>{devices.filter((item) => item.kind === "videoinput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Camera ${index + 1}`}</option>)}</select></label>
+              {intent !== "audio" && <label>Camera<select value={cameraDevice} onChange={(event) => void switchDevice("videoinput", event.target.value)}>{devices.filter((item) => item.kind === "videoinput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Camera ${index + 1}`}</option>)}</select></label>}
               <label>Microphone<select value={microphoneDevice} onChange={(event) => void switchDevice("audioinput", event.target.value)}>{devices.filter((item) => item.kind === "audioinput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Microphone ${index + 1}`}</option>)}</select></label>
               <label>Speaker<select value={speakerDevice} onChange={(event) => void switchDevice("audiooutput", event.target.value)}>{devices.filter((item) => item.kind === "audiooutput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Speaker ${index + 1}`}</option>)}</select></label>
             </div>
             {error && <div className="meeting-error" role="alert">{error}</div>}
             <button className="primary-button" disabled={connecting} onClick={connectMeeting}>
-              <ShieldCheck size={18} weight="fill" /> {connecting ? "Connecting…" : "Join encrypted media"}
+              <ShieldCheck size={18} weight="fill" /> {connecting ? "Connecting…" : intent === "audio" ? "Join encrypted call" : "Join encrypted media"}
             </button>
             {error && <button className="soft-button" onClick={onFallbackPresent}><MonitorArrowUp size={17} /> Use tunnel presentation</button>}
             <p className="privacy-note">A Cloudflare browser invitation can open this room, but camera media also requires the configured public LiveKit/TURN endpoint.</p>
@@ -561,6 +591,20 @@ export default function MeetingPanel({
           </>
         )}
       </section>
+
+      {captionsConfirmOpen && (
+        <div className="modal-backdrop confirm-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCaptionsConfirmOpen(false)}>
+          <section className="modal-card confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="captions-confirm-title" aria-describedby="captions-confirm-message">
+            <p className="eyebrow">Live captions</p>
+            <h2 id="captions-confirm-title">Enable captions?</h2>
+            <p id="captions-confirm-message">Browser captions may send microphone audio to your browser vendor&apos;s speech service. Caption text is encrypted by Cinder, but recognition may not be local.</p>
+            <div className="confirm-actions">
+              <button className="soft-button" type="button" onClick={() => setCaptionsConfirmOpen(false)}>Cancel</button>
+              <button className="primary-button" type="button" onClick={() => { setCaptionsConfirmOpen(false); startCaptions(); }}>Enable captions</button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { loadEnvFile } from "node:process";
+import { ensureCloudflaredOnPath } from "./ensure-cloudflared.mjs";
 import { liveKitKeysValue, resolveMediaCredentials } from "./media-credentials.mjs";
 
 try {
@@ -8,8 +9,16 @@ try {
   if (error?.code !== "ENOENT") throw error;
 }
 
+const routeMode = process.env.CINDER_ROUTES ?? "both";
+const restartDelayMs = Math.max(3, Number.parseInt(process.env.CINDER_RESTART_DELAY_SEC ?? "10", 10)) * 1000;
+
 const children = new Set();
 let stopping = false;
+let mediaProcess = null;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function start(command, args, options = {}) {
   const child = spawn(command, args, { stdio: "inherit", ...options });
@@ -25,18 +34,29 @@ function stop(code = 0) {
   setTimeout(() => process.exit(code), 900).unref();
 }
 
-const relayEnvironment = { ...process.env };
-const hasMediaUrl = Boolean(process.env.LIVEKIT_URL?.trim());
-const startConfiguredMedia = process.env.CINDER_START_LIVEKIT === "true";
-let mediaProcess = null;
-let mediaCredentials;
+function startRelay(relayEnvironment) {
+  const useNodeRelay = process.env.CINDER_RELAY === "node";
+  return new Promise((resolve) => {
+    const relay = useNodeRelay
+      ? start(process.execPath, ["--import", "tsx", "server/index.ts"], { env: relayEnvironment })
+      : start("cargo", ["run", "--release", "--locked", "--manifest-path", "rust-server/Cargo.toml"], { env: relayEnvironment });
+    relay.once("exit", (code) => resolve(code ?? 0));
+  });
+}
 
+const relayEnvironment = { ...process.env };
+await ensureCloudflaredOnPath(routeMode, relayEnvironment);
+
+let mediaCredentials;
 try {
   mediaCredentials = resolveMediaCredentials(process.env);
 } catch (error) {
   console.error(error.message);
   process.exit(1);
 }
+
+const hasMediaUrl = Boolean(process.env.LIVEKIT_URL?.trim());
+const startConfiguredMedia = process.env.CINDER_START_LIVEKIT === "true";
 
 if (startConfiguredMedia) {
   const livekitAvailable = spawnSync("livekit-server", ["--version"], { stdio: "ignore" }).status === 0;
@@ -71,15 +91,18 @@ if (startConfiguredMedia) {
   }
 }
 
-const useNodeRelay = process.env.CINDER_RELAY === "node";
-const relay = useNodeRelay
-  ? start(process.execPath, ["--import", "tsx", "server/index.ts"], { env: relayEnvironment })
-  : start("cargo", ["run", "--release", "--locked", "--manifest-path", "rust-server/Cargo.toml"], { env: relayEnvironment });
-console.log(`Cinder is using the ${useNodeRelay ? "Node compatibility" : "Rust"} relay.`);
-relay.once("exit", (code) => stop(code ?? 1));
+console.log(`Cinder is using the ${process.env.CINDER_RELAY === "node" ? "Node compatibility" : "Rust"} relay.`);
+
+process.once("SIGINT", () => stop(0));
+process.once("SIGTERM", () => stop(0));
+
 mediaProcess?.once("exit", (code) => {
   if (!stopping && code) console.log("The media server stopped; chat and files remain available.");
 });
 
-process.once("SIGINT", () => stop(0));
-process.once("SIGTERM", () => stop(0));
+while (!stopping) {
+  await startRelay(relayEnvironment);
+  if (stopping) break;
+  console.log(`\nCinder will restart in ${restartDelayMs / 1000} seconds with a fresh room and tunnel...\n`);
+  await sleep(restartDelayMs);
+}

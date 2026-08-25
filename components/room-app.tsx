@@ -17,7 +17,9 @@ import {
   LinkSimple,
   LockKey,
   Moon,
+  Microphone,
   MonitorArrowUp,
+  Phone,
   PaperPlaneRight,
   Paperclip,
   ShieldCheck,
@@ -31,16 +33,17 @@ import {
   VideoCamera,
   X,
 } from "@phosphor-icons/react";
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ClipboardEvent, DragEvent, FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import MeetingPanel from "./meeting-panel";
 
 type WireMessage = { id: string; encrypted: string; createdAt: number };
-type Message = WireMessage & { sender: string; text: string };
+type MessageAttachment = { fileId: string; name: string; type: string; size: number };
+type Message = WireMessage & { sender: string; text: string; attachment?: MessageAttachment };
 type WireFile = { id: string; encryptedMeta: string; encryptedSize: number; createdAt: number };
 type SharedFile = WireFile & { name: string; type: string; size: number; sender: string };
 type Route = { type: "local" | "onion" | "cloudflare"; baseUrl: string };
-type Preview = { url: string; type: string; name: string };
+type Preview = { url: string; type: string; name: string; fileId?: string };
 type ScreenStartWire = { id: string; encrypted: string; createdAt: number };
 type ScreenChunkWire = { streamId: string; sequence: number; encrypted: string };
 type ActivePresentation = ScreenStartWire & { presenter: string; mimeType: string };
@@ -49,10 +52,127 @@ type PresenceWire = { id: string; encryptedAlias: string };
 export type MeetingSignal = { id: string; createdAt: number; senderId: string; sender: string; type: "hand" | "reaction" | "caption" | "question" | "question-answer" | "poll" | "vote"; value: string; extra?: string[] };
 type MeetingSignalWire = { id: string; encrypted: string; createdAt: number };
 type PendingPerson = { id: string; name: string };
+type ConfirmDialog = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  tone?: "danger" | "default";
+  onConfirm: () => void;
+};
+type RestartCountdown = { seconds: number; waitingForServer?: boolean };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEMO_TIME = 1_788_000_000_000;
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
+const SUPPORT_URL = "https://www.paypal.com/paypalme/lewisjohnvillamor/250";
+
+function renderLinkedText(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const index = match.index ?? 0;
+    if (index > lastIndex) nodes.push(text.slice(lastIndex, index));
+    nodes.push(<a className="message-link" href={match[0]} key={`${index}-${match[0]}`} rel="noopener noreferrer" target="_blank">{match[0]}</a>);
+    lastIndex = index + match[0].length;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes.length ? nodes : [text];
+}
+
+function voiceMimeType() {
+  if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
+  if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm")) return "audio/webm";
+  if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/mp4")) return "audio/mp4";
+  return "";
+}
+
+function ChatAttachment({
+  attachment,
+  onOpen,
+  roomId,
+  roomKey,
+}: {
+  attachment: MessageAttachment;
+  roomId: string;
+  roomKey: CryptoKey;
+  onOpen: (attachment: MessageAttachment) => void;
+}) {
+  const [mediaUrl, setMediaUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [missing, setMissing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = "";
+    const isInlineMedia = attachment.type.startsWith("image/") || attachment.type.startsWith("audio/") || attachment.type.startsWith("video/");
+    if (!isInlineMedia) return undefined;
+
+    void (async () => {
+      setLoading(true);
+      try {
+        const response = await fetch(`/api/files/${encodeURIComponent(attachment.fileId)}?room=${encodeURIComponent(roomId)}`);
+        if (!response.ok) throw new Error("missing");
+        const clear = await decryptBytes(roomKey, new Uint8Array(await response.arrayBuffer()));
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(new Blob([clear], { type: attachment.type }));
+        setMediaUrl(objectUrl);
+      } catch {
+        if (!cancelled) setMissing(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attachment.fileId, attachment.type, roomId, roomKey]);
+
+  const openAttachment = () => {
+    onOpen(attachment);
+  };
+
+  if (attachment.type.startsWith("image/")) {
+    return (
+      <button className="message-attachment image-attachment" type="button" onClick={openAttachment} aria-label={`Open ${attachment.name}`}>
+        {loading && <span className="attachment-placeholder">Decrypting image…</span>}
+        {missing && <span className="attachment-placeholder">Image unavailable</span>}
+        {mediaUrl && <img alt={attachment.name} src={mediaUrl} />}
+      </button>
+    );
+  }
+
+  if (attachment.type.startsWith("audio/")) {
+    return (
+      <div className="message-attachment audio-attachment">
+        {loading && <span className="attachment-placeholder">Decrypting voice note…</span>}
+        {missing && <span className="attachment-placeholder">Voice note unavailable</span>}
+        {mediaUrl && <audio controls preload="metadata" src={mediaUrl} />}
+        <span className="attachment-label">{attachment.name}</span>
+      </div>
+    );
+  }
+
+  if (attachment.type.startsWith("video/")) {
+    return (
+      <button className="message-attachment video-attachment" type="button" onClick={openAttachment} aria-label={`Open ${attachment.name}`}>
+        {loading && <span className="attachment-placeholder">Decrypting video…</span>}
+        {missing && <span className="attachment-placeholder">Video unavailable</span>}
+        {mediaUrl ? <video controls preload="metadata" src={mediaUrl} /> : <span className="attachment-label">{attachment.name}</span>}
+      </button>
+    );
+  }
+
+  return (
+    <button className="message-attachment file-attachment" type="button" onClick={openAttachment}>
+      <FileGlyph type={attachment.type} />
+      <span className="attachment-label">{attachment.name}</span>
+      <span className="attachment-meta">{formatBytes(attachment.size)}</span>
+    </button>
+  );
+}
 
 function toArrayBuffer(bytes: Uint8Array) {
   const copy = new Uint8Array(bytes.byteLength);
@@ -175,21 +295,30 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
   const [shareOpen, setShareOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [toast, setToast] = useState("");
   const [fatal, setFatal] = useState("");
+  const [restartCountdown, setRestartCountdown] = useState<RestartCountdown | null>(null);
+  const [guestExitCountdown, setGuestExitCountdown] = useState<number | null>(null);
   const [left, setLeft] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [presenting, setPresenting] = useState(false);
   const [activePresentation, setActivePresentation] = useState<ActivePresentation | null>(null);
   const [screenOpen, setScreenOpen] = useState(false);
   const [meetingOpen, setMeetingOpen] = useState(false);
-  const [meetingIntent, setMeetingIntent] = useState<"video" | "present">("video");
+  const [meetingIntent, setMeetingIntent] = useState<"video" | "audio" | "present">("video");
+  const [recordingVoice, setRecordingVoice] = useState(false);
+  const [composerDragging, setComposerDragging] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const displayStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -206,6 +335,21 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
   const showToast = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2200);
+  }, []);
+
+  const requestConfirm = useCallback((dialog: ConfirmDialog) => {
+    setConfirmDialog(dialog);
+  }, []);
+
+  const closeConfirm = useCallback(() => {
+    setConfirmDialog(null);
+  }, []);
+
+  const confirmAction = useCallback(() => {
+    setConfirmDialog((current) => {
+      current?.onConfirm();
+      return null;
+    });
   }, []);
 
   useEffect(() => {
@@ -264,7 +408,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
   }, [demo]);
 
   const decryptMessage = useCallback(async (wire: WireMessage, key: CryptoKey) => {
-    const clear = await decryptJson<{ sender: string; text: string }>(key, wire.encrypted);
+    const clear = await decryptJson<{ sender: string; text: string; attachment?: MessageAttachment }>(key, wire.encrypted);
     return { ...wire, ...clear };
   }, []);
 
@@ -318,7 +462,14 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     socket.on("room:error", (message: string) => showToast(message));
     socket.on("room:destroyed", () => {
       setConnected(false);
+      setGuestExitCountdown(10);
       setFatal("The host destroyed this room. Its temporary contents are no longer available.");
+    });
+    socket.on("room:restarting", (payload: { countdownSeconds?: number }) => {
+      setRestartCountdown({
+        seconds: payload?.countdownSeconds ?? 10,
+        waitingForServer: false,
+      });
     });
     socket.on("admission:waiting", () => setWaiting(true));
     socket.on("admission:admitted", (state: { locked?: boolean }) => { setWaiting(false); setAdmissionLocked(Boolean(state?.locked)); });
@@ -376,6 +527,10 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
       } catch {
         showToast("A file description could not be decrypted.");
       }
+    });
+    socket.on("file:removed", (item: { id?: string }) => {
+      if (!item?.id) return;
+      setFiles((current) => current.filter((file) => file.id !== item.id));
     });
     const revealPresentation = async (wire: ScreenStartWire) => {
       const clear = await decryptJson<{ presenter: string; mimeType: string }>(roomKey, wire.encrypted);
@@ -447,9 +602,78 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     };
   }, [alias, appendScreenQueue, decryptFile, decryptMessage, demo, ownerToken, roomId, roomKey, showToast, stopLocalPresentation]);
 
+  async function openFreshSession() {
+    const port = window.location.port || "3000";
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/api/session`);
+        if (!response.ok) throw new Error("not ready");
+        const session = await response.json() as { roomId: string; ownerToken: string; routes: Route[] };
+        const cloudflareRoute = session.routes.find((route) => route.type === "cloudflare");
+        const base = cloudflareRoute?.baseUrl ?? `http://127.0.0.1:${port}`;
+        const newKey = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+        window.location.assign(`${base}/room/${session.roomId}#o=${session.ownerToken}&k=${newKey}`);
+        return;
+      } catch {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    }
+    setRestartCountdown(null);
+    showToast("The server did not come back in time. Check your terminal or run npm run room again.");
+  }
+
+  useEffect(() => {
+    if (!restartCountdown) return undefined;
+    if (restartCountdown.seconds > 0) {
+      const timer = window.setTimeout(() => {
+        setRestartCountdown((current) => current ? { ...current, seconds: current.seconds - 1 } : null);
+      }, 1000);
+      return () => window.clearTimeout(timer);
+    }
+    if (!restartCountdown.waitingForServer) {
+      setRestartCountdown((current) => current ? { ...current, waitingForServer: true } : null);
+      void openFreshSession();
+    }
+    return undefined;
+  }, [restartCountdown]);
+
+  useEffect(() => {
+    if (guestExitCountdown === null) return undefined;
+    if (guestExitCountdown <= 0) {
+      window.close();
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setGuestExitCountdown((current) => (current === null ? null : current - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [guestExitCountdown]);
+
+  function supportPanel() {
+    return (
+      <>
+        <p>Cinder Room is free and open source. If it helps you, you can support continued development.</p>
+        <div className="support-card">
+          <Coffee size={28} weight="duotone" />
+          <div>
+            <strong>Support Lewis</strong>
+            <span>One-time contribution through PayPal</span>
+          </div>
+        </div>
+        <a className="primary-button support-button" href={SUPPORT_URL} target="_blank" rel="noreferrer">
+          <Coffee size={17} weight="fill" /> Support via PayPal
+        </a>
+        <p className="privacy-note">Opens PayPal in a new tab. No account is required to use Cinder Room.</p>
+      </>
+    );
+  }
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
+
+  useEffect(() => () => {
+    voiceRecorderRef.current?.stop();
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
 
   useEffect(() => () => {
     if (preview) URL.revokeObjectURL(preview.url);
@@ -577,8 +801,14 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     }
   }
 
-  async function uploadOne(file: globalThis.File) {
-    if (!roomKey || !roomId) return;
+  async function shareFileInChat(attachment: MessageAttachment, caption = "") {
+    if (!roomKey || !socketRef.current?.connected) return;
+    const encrypted = await encryptJson(roomKey, { sender: ownName, text: caption, attachment });
+    socketRef.current.emit("message:send", { encrypted });
+  }
+
+  async function uploadOne(file: globalThis.File, shareInChat = true) {
+    if (!roomKey || !roomId) return null;
     const uploadId = crypto.randomUUID();
     setUploadProgress((current) => ({ ...current, [uploadId]: 2 }));
     try {
@@ -589,29 +819,42 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
         sender: ownName,
       });
       const encrypted = await encryptBytes(roomKey, new Uint8Array(await file.arrayBuffer()));
-
-      await new Promise<void>((resolve, reject) => {
+      const stored = await new Promise<WireFile>((resolve, reject) => {
         const request = new XMLHttpRequest();
         request.open("POST", "/api/files");
         request.setRequestHeader("Content-Type", "application/octet-stream");
         request.setRequestHeader("X-Cinder-Room", roomId);
         request.setRequestHeader("X-Cinder-Meta", encryptedMeta);
+        if (socketId) request.setRequestHeader("X-Cinder-Socket", socketId);
         request.upload.onprogress = (progress) => {
           if (progress.lengthComputable) {
             setUploadProgress((current) => ({ ...current, [uploadId]: Math.max(5, Math.round(progress.loaded / progress.total * 100)) }));
           }
         };
         request.onload = () => {
-          if (request.status >= 200 && request.status < 300) return resolve();
+          if (request.status >= 200 && request.status < 300) {
+            try { resolve(JSON.parse(request.responseText) as WireFile); }
+            catch { reject(new Error("Upload rejected")); }
+            return;
+          }
           try { reject(new Error(JSON.parse(request.responseText).error ?? "Upload rejected")); }
           catch { reject(new Error("Upload rejected")); }
         };
         request.onerror = () => reject(new Error("Upload interrupted"));
         request.send(encrypted);
       });
+      const attachment: MessageAttachment = {
+        fileId: stored.id,
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+      };
+      if (shareInChat) await shareFileInChat(attachment);
       showToast(`${file.name} added to the room.`);
+      return attachment;
     } catch (error) {
       showToast(error instanceof Error ? error.message : "The upload failed.");
+      return null;
     } finally {
       setUploadProgress((current) => {
         const next = { ...current };
@@ -621,9 +864,123 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     }
   }
 
-  async function handleFiles(list: FileList | null) {
+  async function handleFiles(list: FileList | null, shareInChat = true) {
     if (!list) return;
-    for (const file of Array.from(list)) await uploadOne(file);
+    for (const file of Array.from(list)) await uploadOne(file, shareInChat);
+  }
+
+  async function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const clipboardFiles = event.clipboardData?.files;
+    if (!clipboardFiles?.length) return;
+    event.preventDefault();
+    await handleFiles(clipboardFiles, true);
+  }
+
+  async function handleComposerDrop(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setComposerDragging(false);
+    if (event.dataTransfer.files.length) await handleFiles(event.dataTransfer.files, true);
+  }
+
+  async function stopVoiceRecording() {
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.stop();
+  }
+
+  async function toggleVoiceRecording() {
+    if (recordingVoice) {
+      await stopVoiceRecording();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      showToast("Voice notes are not supported in this browser.");
+      return;
+    }
+    const mimeType = voiceMimeType();
+    if (!mimeType) {
+      showToast("This browser has no compatible voice-note format.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceStreamRef.current = stream;
+      voiceChunksRef.current = [];
+      const recorder = new MediaRecorder(stream, { mimeType });
+      voiceRecorderRef.current = recorder;
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size) voiceChunksRef.current.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        stream.getTracks().forEach((track) => track.stop());
+        voiceStreamRef.current = null;
+        voiceRecorderRef.current = null;
+        setRecordingVoice(false);
+        const blob = new Blob(voiceChunksRef.current, { type: mimeType });
+        voiceChunksRef.current = [];
+        if (!blob.size) return;
+        const extension = mimeType.includes("mp4") ? "m4a" : "webm";
+        void uploadOne(new File([blob], `voice-${Date.now()}.${extension}`, { type: mimeType }), true);
+      }, { once: true });
+      recorder.start();
+      setRecordingVoice(true);
+    } catch {
+      showToast("Microphone access was not granted.");
+    }
+  }
+
+  async function openAttachment(attachment: MessageAttachment, download = false) {
+    if (!roomKey) return;
+    showToast("Decrypting file locally…");
+    try {
+      const response = await fetch(`/api/files/${encodeURIComponent(attachment.fileId)}?room=${encodeURIComponent(roomId)}`);
+      if (!response.ok) throw new Error("The file is no longer available.");
+      const clear = await decryptBytes(roomKey, new Uint8Array(await response.arrayBuffer()));
+      const url = URL.createObjectURL(new Blob([clear], { type: attachment.type }));
+      if (download || (!attachment.type.startsWith("image/") && !attachment.type.startsWith("video/"))) {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = attachment.name;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 3000);
+      } else {
+        setPreview({ url, type: attachment.type, name: attachment.name, fileId: attachment.fileId });
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "The file could not be decrypted.");
+    }
+  }
+
+  async function performDeleteFile(item: SharedFile) {
+    if (!roomId) return;
+    try {
+      const response = await fetch(`/api/files/${encodeURIComponent(item.id)}?room=${encodeURIComponent(roomId)}`, {
+        method: "DELETE",
+        headers: {
+          ...(socketId ? { "X-Cinder-Socket": socketId } : {}),
+          ...(ownerToken ? { "X-Cinder-Owner-Token": ownerToken } : {}),
+        },
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: "Delete rejected" }));
+        throw new Error(typeof payload.error === "string" ? payload.error : "Delete rejected");
+      }
+      setFiles((current) => current.filter((file) => file.id !== item.id));
+      showToast(`${item.name} deleted.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "The file could not be deleted.");
+    }
+  }
+
+  function deleteFile(item: SharedFile) {
+    if (!roomId || item.sender !== ownName) return;
+    requestConfirm({
+      title: `Delete ${item.name}?`,
+      message: "This removes the encrypted file from the room for everyone.",
+      confirmLabel: "Delete file",
+      tone: "danger",
+      onConfirm: () => void performDeleteFile(item),
+    });
   }
 
   async function openFile(item: SharedFile, download = false) {
@@ -660,12 +1017,16 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
 
   function destroyRoom() {
     if (!ownerToken || !socketRef.current) return;
-    if (window.confirm("Destroy this room now? Everyone will be disconnected and all temporary files will be deleted.")) {
-      socketRef.current.emit("room:destroy", { ownerToken });
-    }
+    requestConfirm({
+      title: "Destroy this room?",
+      message: "The server will stop, start again in 10 seconds, and open a fresh Cloudflare tunnel.",
+      confirmLabel: "Destroy room",
+      tone: "danger",
+      onConfirm: () => socketRef.current?.emit("room:destroy", { ownerToken }),
+    });
   }
 
-  function openMeeting(intent: "video" | "present") {
+  function openMeeting(intent: "video" | "audio" | "present") {
     if (demo) {
       showToast("Group media is available when the self-hosted relay is running.");
       return;
@@ -709,10 +1070,9 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     socketRef.current?.emit("moderation:command", { ownerToken, target, command });
   }
 
-  function leaveRoom() {
-    if (ownerToken && !window.confirm("Leave without destroying the room? Everyone else will remain connected, and this tab will lose its host controls.")) return;
-
+  function leaveRoomConfirmed() {
     stopLocalPresentation(false);
+    void stopVoiceRecording();
     socketRef.current?.disconnect();
     socketRef.current = null;
     if (preview) URL.revokeObjectURL(preview.url);
@@ -739,6 +1099,19 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     setLeft(true);
   }
 
+  function leaveRoom() {
+    if (ownerToken) {
+      requestConfirm({
+        title: "Leave without destroying?",
+        message: "Everyone else will remain connected, and this tab will lose its host controls.",
+        confirmLabel: "Leave room",
+        onConfirm: leaveRoomConfirmed,
+      });
+      return;
+    }
+    leaveRoomConfirmed();
+  }
+
   if (left) {
     return (
       <main className="join-overlay">
@@ -762,6 +1135,9 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
           <h1 id="ended-title">Nothing stays behind.</h1>
           <p>{fatal}</p>
           <div className="security-row"><LockKey size={17} /><span>No recoverable room history is stored in this browser.</span></div>
+          {guestExitCountdown !== null ? (
+            <p className="recovery-note">Closing this tab in {guestExitCountdown}s…</p>
+          ) : null}
         </section>
       </main>
     );
@@ -808,6 +1184,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
           ) : (
             <button className="soft-button" onClick={() => openMeeting("present")}><MonitorArrowUp size={17} /><span className="button-label">Present</span></button>
           )}
+          <button className="soft-button" onClick={() => openMeeting("audio")}><Phone size={17} /><span className="button-label">Call</span></button>
           <button className="soft-button" onClick={() => openMeeting("video")}><VideoCamera size={17} /><span className="button-label">Video</span></button>
           <button className="soft-button mobile-hide" onClick={() => setSecurityOpen(true)}><ShieldCheck size={17} /><span className="button-label">Privacy</span></button>
           <button className="soft-button" onClick={leaveRoom}><SignOut size={17} /><span className="button-label">Leave</span></button>
@@ -840,20 +1217,21 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
             {messages.length === 0 ? (
               <div className="empty-chat"><div className="empty-symbol"><LockKey size={23} weight="duotone" /></div><strong>The room is quiet.</strong><p>Start the conversation. Everything sent here is encrypted before it reaches the relay.</p></div>
             ) : messages.map((message) => (
-              <article className={`message ${message.sender === ownName ? "mine" : ""}`} key={message.id}>
+              <article className={`message ${message.sender === ownName ? "mine" : "theirs"}`} key={message.id}>
                 <div className="avatar">{initials(message.sender)}</div>
-                <div><div className="message-meta"><strong>{message.sender}</strong><time suppressHydrationWarning>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div><p className="message-copy">{message.text}</p></div>
+                <div className="message-body"><div className="message-meta"><strong>{message.sender}</strong><time suppressHydrationWarning>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div>{message.text ? <p className="message-copy">{renderLinkedText(message.text)}</p> : null}{message.attachment && roomKey ? <ChatAttachment attachment={message.attachment} onOpen={(item) => void openAttachment(item)} roomId={roomId} roomKey={roomKey} /> : null}</div>
               </article>
             ))}
             <div ref={endRef} />
           </div>
           <div className="composer-wrap">
-            <form className="composer" onSubmit={sendMessage}>
+            <form className={`composer ${composerDragging ? "dragging" : ""} ${recordingVoice ? "recording" : ""}`} onDragLeave={() => setComposerDragging(false)} onDragOver={(event) => { event.preventDefault(); setComposerDragging(true); }} onDrop={(event) => void handleComposerDrop(event)} onSubmit={sendMessage}>
               <button className="icon-button" type="button" aria-label="Attach a file" onClick={() => fileInputRef.current?.click()}><Paperclip size={19} /></button>
-              <textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Write an encrypted message…" aria-label="Message" />
-              <button className="send-button" type="submit" disabled={!draft.trim() || !connected} aria-label="Send message"><PaperPlaneRight size={18} weight="fill" /></button>
+              <button className={`icon-button ${recordingVoice ? "recording-active" : ""}`} type="button" aria-label={recordingVoice ? "Stop and send voice note" : "Record a voice note"} onClick={() => void toggleVoiceRecording()}><Microphone size={19} weight={recordingVoice ? "fill" : "regular"} /></button>
+              <textarea rows={1} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} onPaste={(event) => void handleComposerPaste(event)} placeholder={recordingVoice ? "Recording voice note…" : "Write a message, paste a file, or drop media…"} aria-label="Message" />
+              <button className="send-button" type="submit" disabled={!draft.trim() || !connected || recordingVoice} aria-label="Send message"><PaperPlaneRight size={18} weight="fill" /></button>
             </form>
-            <p className="composer-note">Enter to send · Shift + Enter for a new line</p>
+            <p className="composer-note">{recordingVoice ? "Tap the microphone again to stop and send." : "Enter to send · Shift + Enter for a new line · paste or drop files, images, and links"}</p>
           </div>
         </section>
 
@@ -870,6 +1248,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
                 <div className="file-kind"><FileGlyph type={item.type} /></div>
                 <div className="file-info"><div className="file-name" title={item.name}>{item.name}</div><div className="file-meta">{formatBytes(item.size)} · {item.sender}</div></div>
                 <button className="icon-button" aria-label={`Open ${item.name}`} onClick={() => openFile(item)}>{item.type.startsWith("image/") || item.type.startsWith("video/") ? <ArrowUp size={17} /> : <DownloadSimple size={17} />}</button>
+                {item.sender === ownName ? <button className="icon-button danger-icon-button" aria-label={`Delete ${item.name}`} onClick={() => void deleteFile(item)}><Trash size={17} /></button> : null}
               </li>
             ))}
           </ul>
@@ -912,7 +1291,16 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
               <div><Gauge size={18} /><strong>{limits.roomStorageMb >= 1024 ? `${limits.roomStorageMb / 1024} GB` : `${limits.roomStorageMb} MB`}</strong><span>ciphertext cap</span></div>
             </div>
             <p className="privacy-note">Recipients can still save or capture anything they can view. Normal-browser routes expose connection metadata to the tunnel provider.</p>
-            <a className="support-link" href="https://www.paypal.com/paypalme/lewisjohnvillamor/300" target="_blank" rel="noreferrer"><Coffee size={17} weight="fill" /> Buy Lewis a coffee</a>
+            <a className="support-link" href={SUPPORT_URL} target="_blank" rel="noreferrer"><Coffee size={17} weight="fill" /> Support via PayPal</a>
+          </section>
+        </div>
+      )}
+
+      {supportOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setSupportOpen(false)}>
+          <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="support-room-title">
+            <div className="panel-heading"><div><p className="eyebrow">Support</p><h2 id="support-room-title">Help keep Cinder Room free.</h2></div><button className="icon-button" aria-label="Close support dialog" onClick={() => setSupportOpen(false)}><X size={18} /></button></div>
+            {supportPanel()}
           </section>
         </div>
       )}
@@ -992,6 +1380,42 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
           </section>
         </div>
       )}
+
+      {confirmDialog && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeConfirm()}>
+          <section className="modal-card confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+            <p className="eyebrow">{confirmDialog.tone === "danger" ? "Destructive action" : "Confirm action"}</p>
+            <h2 id="confirm-title">{confirmDialog.title}</h2>
+            <p id="confirm-message">{confirmDialog.message}</p>
+            <div className="confirm-actions">
+              <button className="soft-button" type="button" onClick={closeConfirm}>Cancel</button>
+              <button className={confirmDialog.tone === "danger" ? "danger-button" : "primary-button"} type="button" onClick={confirmAction}>
+                {confirmDialog.tone === "danger" ? <Trash size={16} /> : null}
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {restartCountdown && (
+        <div className="modal-backdrop restart-backdrop" role="presentation">
+          <section className="modal-card restart-card" role="alertdialog" aria-modal="true" aria-labelledby="restart-title">
+            <p className="eyebrow">Room reset</p>
+            <h2 id="restart-title">{restartCountdown.waitingForServer ? "Waiting for the new tunnel" : "Server restarting"}</h2>
+            <p className="restart-countdown">{restartCountdown.waitingForServer ? "…" : restartCountdown.seconds}</p>
+            <p>{restartCountdown.waitingForServer
+              ? "Cinder is booting a new room and Cloudflare Quick Tunnel. This tab will jump to the new host link automatically."
+              : "The room and tunnel are shutting down. A new session with a new public URL opens when the countdown reaches zero."}</p>
+          </section>
+        </div>
+      )}
+
+      <footer className="room-footer">
+        <button className="support-footer-link" type="button" onClick={() => setSupportOpen(true)}>
+          <Coffee size={16} weight="fill" /> Support the project
+        </button>
+      </footer>
 
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>

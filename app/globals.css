@@ -74,7 +74,7 @@ textarea:focus-visible {
 .room-app {
   min-height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   background:
     radial-gradient(circle at 84% -15%, color-mix(in srgb, var(--accent) 11%, transparent), transparent 34rem),
     var(--bg);
@@ -418,18 +418,37 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 11px;
-  max-width: 760px;
+  max-width: min(760px, 88%);
   margin-bottom: 22px;
   animation: message-in 220ms ease-out both;
 }
 
+.message.theirs {
+  margin-right: auto;
+}
+
 .message.mine {
   margin-left: auto;
+  grid-template-columns: minmax(0, 1fr) 36px;
 }
 
 .message.mine .avatar {
+  order: 2;
   background: color-mix(in srgb, var(--accent) 15%, var(--surface));
   color: var(--accent);
+}
+
+.message.mine .message-body {
+  order: 1;
+  text-align: right;
+}
+
+.message.mine .message-meta {
+  justify-content: flex-end;
+}
+
+.message.mine .message-copy {
+  text-align: left;
 }
 
 .message-meta {
@@ -476,7 +495,7 @@ textarea:focus-visible {
 
 .composer {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: end;
   gap: 8px;
   padding: 8px;
@@ -484,6 +503,83 @@ textarea:focus-visible {
   border: 1px solid var(--line-strong);
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.composer.dragging {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.composer.recording {
+  border-color: color-mix(in srgb, #e45757 45%, var(--line-strong));
+}
+
+.icon-button.recording-active {
+  color: #e45757;
+  background: color-mix(in srgb, #e45757 10%, var(--surface));
+}
+
+.message-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.message-attachment {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.message-attachment.image-attachment img,
+.message-attachment.video-attachment video {
+  display: block;
+  max-width: min(320px, 100%);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+
+.message-attachment.audio-attachment {
+  cursor: default;
+}
+
+.message-attachment.audio-attachment audio {
+  display: block;
+  width: min(320px, 100%);
+}
+
+.message-attachment.file-attachment {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.attachment-label,
+.attachment-meta,
+.attachment-placeholder {
+  font-size: 12px;
+}
+
+.attachment-meta,
+.attachment-placeholder {
+  color: var(--muted);
+}
+
+.danger-icon-button {
+  color: #e45757;
 }
 
 .composer textarea {
@@ -559,9 +655,16 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
+.prejoin-preview.audio-preview {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  color: var(--accent);
+}
+
 .file-item {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  grid-template-columns: 38px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   padding: 12px 0;
@@ -651,6 +754,27 @@ textarea:focus-visible {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.confirm-card h2 {
+  font-size: 26px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.confirm-actions .danger-button,
+.confirm-actions .primary-button,
+.confirm-actions .soft-button {
+  min-width: 118px;
+}
+
+.confirm-layer {
+  z-index: 120;
 }
 
 .field-label {
@@ -762,6 +886,128 @@ textarea:focus-visible {
 }
 
 .support-link:hover { text-decoration: underline; }
+
+.support-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  align-items: center;
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.support-card strong {
+  display: block;
+  font-size: 14px;
+}
+
+.support-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.support-button,
+.support-inline-button {
+  margin-top: 8px;
+}
+
+.recovery-panel {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.recovery-lead,
+.recovery-note {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.recovery-note {
+  color: var(--accent);
+}
+
+.recovery-steps {
+  margin: 0 0 16px 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.recovery-steps code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.recovery-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.recovery-form input {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.room-footer {
+  display: flex;
+  justify-content: center;
+  padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+}
+
+.support-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.support-footer-link:hover {
+  color: var(--accent);
+}
+
+.restart-backdrop {
+  z-index: 110;
+}
+
+.restart-card {
+  text-align: center;
+}
+
+.restart-countdown {
+  margin: 8px 0 14px;
+  font-size: 56px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.06em;
+  color: var(--accent);
+}
+
+.join-card {
+  width: min(520px, 100%);
+}
 
 .toast {
   position: fixed;

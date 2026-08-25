@@ -71,6 +71,7 @@ struct PendingItem {
 struct StoredFile {
     public: PublicFile,
     path: PathBuf,
+    uploader_socket_id: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -149,6 +150,7 @@ struct AppState {
     reserved_files: AtomicUsize,
     stored_ciphertext_bytes: AtomicUsize,
     file_events: broadcast::Sender<PublicFile>,
+    file_removals: broadcast::Sender<String>,
     shutdown: broadcast::Sender<()>,
     _run_dir: TempDir,
 }
@@ -549,6 +551,11 @@ async fn upload_file(
         committed: false,
     };
     let encrypted_meta = encrypted_meta.unwrap_or_default().to_owned();
+    let uploader_socket_id = headers
+        .get("x-cinder-socket")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
     let Ok(body) = to_bytes(request.into_body(), state.max_file_bytes + 28).await else {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -606,6 +613,7 @@ async fn upload_file(
         StoredFile {
             public: public.clone(),
             path,
+            uploader_socket_id,
         },
     );
     guard.committed = true;
@@ -639,6 +647,50 @@ async fn download_file(
             .insert(header::CONTENT_LENGTH, length);
     }
     response
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovedFile {
+    id: String,
+}
+
+async fn delete_file(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RoomQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if query.room.as_deref() != Some(state.room_id.as_str()) {
+        return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
+    }
+    let mut files = state.files.write().expect("files lock");
+    let Some(file) = files.remove(&id) else {
+        return (StatusCode::NOT_FOUND, "File unavailable").into_response();
+    };
+    drop(files);
+    let socket_id = headers
+        .get("x-cinder-socket")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let owner_token = headers
+        .get("x-cinder-owner-token")
+        .and_then(|value| value.to_str().ok());
+    let is_owner = owner_token.is_some_and(|token| owner_matches(&state, token));
+    if file.uploader_socket_id != socket_id && !is_owner {
+        state.files.write().expect("files lock").insert(id.clone(), file);
+        return (
+            StatusCode::FORBIDDEN,
+            "Only the sender or host can delete this file.",
+        )
+            .into_response();
+    }
+    let _ = tokio::fs::remove_file(file.path).await;
+    state
+        .stored_ciphertext_bytes
+        .fetch_sub(file.public.encrypted_size, Ordering::SeqCst);
+    let _ = state.file_removals.send(id.clone());
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn static_asset(
@@ -845,11 +897,21 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                 let meeting_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let screen_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let mut file_events = state.file_events.subscribe();
+                let mut file_removals = state.file_removals.subscribe();
                 let file_socket = socket.clone();
                 tokio::spawn(async move {
-                    while let Ok(file) = file_events.recv().await {
-                        if file_socket.emit("file:added", &file).is_err() {
-                            break;
+                    loop {
+                        tokio::select! {
+                            Ok(file) = file_events.recv() => {
+                                if file_socket.emit("file:added", &file).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(id) = file_removals.recv() => {
+                                if file_socket.emit("file:removed", &RemovedFile { id }).is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                 });
@@ -1526,6 +1588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     restrict_directory(&file_dir)?;
     let (shutdown, _) = broadcast::channel(8);
     let (file_events, _) = broadcast::channel(64);
+    let (file_removals, _) = broadcast::channel(64);
     let (socket_layer, io) = SocketIo::builder()
         .max_payload(2 * 1024 * 1024)
         .build_layer();
@@ -1563,6 +1626,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reserved_files: AtomicUsize::new(0),
         stored_ciphertext_bytes: AtomicUsize::new(0),
         file_events,
+        file_removals,
         shutdown,
         _run_dir: run_dir,
     });
@@ -1579,7 +1643,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .post(upload_file)
                 .layer(DefaultBodyLimit::max(state.max_file_bytes + 28)),
         )
-        .route("/api/files/{id}", get(download_file))
+        .route("/api/files/{id}", get(download_file).delete(delete_file))
         .route("/room/{room}", get(room_page))
         .route("/{name}", get(static_asset))
         .route("/", get(root_page))
