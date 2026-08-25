@@ -7,7 +7,7 @@ COPY components ./components
 COPY app/globals.css ./app/globals.css
 RUN npm run build:room-ui
 
-FROM rust:1.89-bookworm AS relay
+FROM rust:1.94-bookworm AS relay
 WORKDIR /app
 COPY rust-server ./rust-server
 RUN cargo build --release --manifest-path rust-server/Cargo.toml

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lewisjohnvillamor/Cinder-Room/actions/workflows/ci.yml/badge.svg)](https://github.com/lewisjohnvillamor/Cinder-Room/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Rust 1.89](https://img.shields.io/badge/Rust-1.89-dea584?logo=rust)](rust-toolchain.toml)
+[![Rust 1.94](https://img.shields.io/badge/Rust-1.94-dea584?logo=rust)](rust-toolchain.toml)
 [![Node 22](https://img.shields.io/badge/Node-22-5fa04e?logo=nodedotjs)](package.json)
 
 Run one temporary, self-hosted room and share its capability link. Cinder Room provides end-to-end encrypted chat, files, group video, screen sharing, waiting-room controls, and meeting activities. The Rust relay is the default; a protocol-compatible Node relay remains available for development and fallback.
@@ -24,7 +24,7 @@ Run one temporary, self-hosted room and share its capability link. Cinder Room p
 
 ## Start locally
 
-Requirements: Node.js 22.13+, npm, and Rust 1.89. Optional route helpers are `tor` and `cloudflared`; optional native group media uses `livekit-server`.
+Requirements: Node.js 22.13+, npm, and Rust 1.94. Optional route helpers are `tor` and `cloudflared`; optional native group media uses `livekit-server`.
 
 ```bash
 git clone https://github.com/lewisjohnvillamor/Cinder-Room.git

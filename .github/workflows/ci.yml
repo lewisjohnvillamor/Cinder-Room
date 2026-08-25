@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: 22.13.0
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy,rustfmt
       - run: npm ci
