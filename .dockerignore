@@ -1,0 +1,12 @@
+.git
+.next
+.openai
+.sites-runtime
+.wrangler
+dist
+node_modules
+rust-server/target
+self-host-dist
+server-dist
+*.tar.gz
+.env*

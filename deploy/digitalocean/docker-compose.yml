@@ -1,0 +1,51 @@
+services:
+  cinder:
+    build:
+      context: ../..
+    restart: unless-stopped
+    environment:
+      CINDER_BIND: 0.0.0.0
+      CINDER_ROUTES: local
+      LIVEKIT_URL: wss://${MEDIA_DOMAIN}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      MAX_PARTICIPANTS: ${MAX_PARTICIPANTS:-12}
+      MAX_FILE_MB: ${MAX_FILE_MB:-25}
+      MAX_CONCURRENT_UPLOADS: ${MAX_CONCURRENT_UPLOADS:-2}
+      MAX_ROOM_STORAGE_MB: ${MAX_ROOM_STORAGE_MB:-256}
+    ports:
+      - 127.0.0.1:3000:3000
+    tmpfs:
+      - /tmp:size=320m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CINDER_DOMAIN: ${CINDER_DOMAIN}
+      MEDIA_DOMAIN: ${MEDIA_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy_data:
+  caddy_config:
