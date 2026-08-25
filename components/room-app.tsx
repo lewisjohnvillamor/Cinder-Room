@@ -925,7 +925,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
         voiceChunksRef.current = [];
         if (!blob.size) return;
         const extension = mimeType.includes("mp4") ? "m4a" : "webm";
-        void uploadOne(new File([blob], `voice-${Date.now()}.${extension}`, { type: mimeType }), true);
+        void uploadOne(new globalThis.File([blob], `voice-${Date.now()}.${extension}`, { type: mimeType }), true);
       }, { once: true });
       recorder.start();
       setRecordingVoice(true);

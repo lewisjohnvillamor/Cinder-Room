@@ -12,11 +12,11 @@ use std::{
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{DefaultBodyLimit, FromRequestParts, Path as AxumPath, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
@@ -181,6 +181,36 @@ impl Drop for UploadGuard {
 #[derive(Deserialize)]
 struct RoomQuery {
     room: Option<String>,
+}
+
+struct FileDeleteHeaders {
+    socket_id: String,
+    owner_token: Option<String>,
+}
+
+impl<S> FromRequestParts<S> for FileDeleteHeaders
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let socket_id = parts
+            .headers
+            .get("x-cinder-socket")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let owner_token = parts
+            .headers
+            .get("x-cinder-owner-token")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        Ok(Self {
+            socket_id,
+            owner_token,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -659,7 +689,10 @@ async fn delete_file(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RoomQuery>,
-    headers: HeaderMap,
+    FileDeleteHeaders {
+        socket_id,
+        owner_token,
+    }: FileDeleteHeaders,
 ) -> Response {
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
@@ -669,14 +702,9 @@ async fn delete_file(
         return (StatusCode::NOT_FOUND, "File unavailable").into_response();
     };
     drop(files);
-    let socket_id = headers
-        .get("x-cinder-socket")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let owner_token = headers
-        .get("x-cinder-owner-token")
-        .and_then(|value| value.to_str().ok());
-    let is_owner = owner_token.is_some_and(|token| owner_matches(&state, token));
+    let is_owner = owner_token
+        .as_deref()
+        .is_some_and(|token| owner_matches(&state, token));
     if file.uploader_socket_id != socket_id && !is_owner {
         state
             .files
