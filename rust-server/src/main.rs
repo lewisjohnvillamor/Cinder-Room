@@ -678,7 +678,11 @@ async fn delete_file(
         .and_then(|value| value.to_str().ok());
     let is_owner = owner_token.is_some_and(|token| owner_matches(&state, token));
     if file.uploader_socket_id != socket_id && !is_owner {
-        state.files.write().expect("files lock").insert(id.clone(), file);
+        state
+            .files
+            .write()
+            .expect("files lock")
+            .insert(id.clone(), file);
         return (
             StatusCode::FORBIDDEN,
             "Only the sender or host can delete this file.",

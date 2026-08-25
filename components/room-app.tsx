@@ -602,7 +602,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     };
   }, [alias, appendScreenQueue, decryptFile, decryptMessage, demo, ownerToken, roomId, roomKey, showToast, stopLocalPresentation]);
 
-  async function openFreshSession() {
+  const pollFreshSession = useCallback(async () => {
     const port = window.location.port || "3000";
     for (let attempt = 0; attempt < 45; attempt += 1) {
       try {
@@ -613,29 +613,34 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
         const base = cloudflareRoute?.baseUrl ?? `http://127.0.0.1:${port}`;
         const newKey = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
         window.location.assign(`${base}/room/${session.roomId}#o=${session.ownerToken}&k=${newKey}`);
-        return;
+        return true;
       } catch {
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
     }
-    setRestartCountdown(null);
-    showToast("The server did not come back in time. Check your terminal or run npm run room again.");
-  }
+    return false;
+  }, []);
 
   useEffect(() => {
-    if (!restartCountdown) return undefined;
-    if (restartCountdown.seconds > 0) {
-      const timer = window.setTimeout(() => {
-        setRestartCountdown((current) => current ? { ...current, seconds: current.seconds - 1 } : null);
-      }, 1000);
-      return () => window.clearTimeout(timer);
-    }
-    if (!restartCountdown.waitingForServer) {
-      setRestartCountdown((current) => current ? { ...current, waitingForServer: true } : null);
-      void openFreshSession();
-    }
-    return undefined;
-  }, [restartCountdown]);
+    if (!restartCountdown || restartCountdown.waitingForServer || restartCountdown.seconds <= 0) return undefined;
+    const startingFinalSecond = restartCountdown.seconds === 1;
+    const timer = window.setTimeout(() => {
+      setRestartCountdown((current) => {
+        if (!current || current.waitingForServer) return current;
+        if (current.seconds > 1) return { ...current, seconds: current.seconds - 1 };
+        return { ...current, seconds: 0, waitingForServer: true };
+      });
+      if (startingFinalSecond) {
+        void pollFreshSession().then((ready) => {
+          if (!ready) {
+            setRestartCountdown(null);
+            showToast("The server did not come back in time. Check your terminal or run npm run room again.");
+          }
+        });
+      }
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [pollFreshSession, restartCountdown, showToast]);
 
   useEffect(() => {
     if (guestExitCountdown === null) return undefined;
