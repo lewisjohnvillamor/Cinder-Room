@@ -10,7 +10,7 @@ RUN npm run build:room-ui
 FROM rust:1.94-bookworm AS relay
 WORKDIR /app
 COPY rust-server ./rust-server
-RUN cargo build --release --manifest-path rust-server/Cargo.toml
+RUN cargo build --release --locked --manifest-path rust-server/Cargo.toml
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tor && rm -rf /var/lib/apt/lists/*

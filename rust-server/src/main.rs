@@ -10,13 +10,13 @@ use std::{
 };
 
 use axum::{
+    Router,
     body::{Body, to_bytes},
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
-    Router,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
@@ -168,7 +168,9 @@ impl Drop for UploadGuard {
                 self.state.reserved_files.fetch_sub(1, Ordering::SeqCst);
             }
             if self.reserved_bytes > 0 {
-                self.state.stored_ciphertext_bytes.fetch_sub(self.reserved_bytes, Ordering::SeqCst);
+                self.state
+                    .stored_ciphertext_bytes
+                    .fetch_sub(self.reserved_bytes, Ordering::SeqCst);
             }
         }
     }
@@ -305,24 +307,30 @@ fn owner_matches(state: &AppState, candidate: &str) -> bool {
 
 fn create_media_token(state: &AppState, encrypted_alias: &str, identity: &str) -> Option<String> {
     let now = now_ms() / 1_000;
-    let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
-        "alg": "HS256",
-        "typ": "JWT"
-    })).ok()?);
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
-        "iss": state.livekit_api_key.as_str(),
-        "sub": identity,
-        "nbf": now.saturating_sub(5),
-        "exp": now + 15 * 60,
-        "metadata": encrypted_alias,
-        "video": {
-            "room": state.room_id.as_str(),
-            "roomJoin": true,
-            "canPublish": true,
-            "canSubscribe": true,
-            "canPublishData": false
-        }
-    })).ok()?);
+    let header = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "alg": "HS256",
+            "typ": "JWT"
+        }))
+        .ok()?,
+    );
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "iss": state.livekit_api_key.as_str(),
+            "sub": identity,
+            "nbf": now.saturating_sub(5),
+            "exp": now + 15 * 60,
+            "metadata": encrypted_alias,
+            "video": {
+                "room": state.room_id.as_str(),
+                "roomJoin": true,
+                "canPublish": true,
+                "canSubscribe": true,
+                "canPublishData": false
+            }
+        }))
+        .ok()?,
+    );
     let unsigned = format!("{header}.{payload}");
     let mut signer = Hmac::<Sha256>::new_from_slice(state.livekit_api_secret.as_bytes()).ok()?;
     signer.update(unsigned.as_bytes());
@@ -331,11 +339,22 @@ fn create_media_token(state: &AppState, encrypted_alias: &str, identity: &str) -
 }
 
 fn media_url_for_request(state: &AppState, headers: &HeaderMap) -> Option<String> {
-    if state.livekit_url.is_empty() || state.livekit_api_key.is_empty() || state.livekit_api_secret.is_empty() {
+    if state.livekit_url.is_empty()
+        || state.livekit_api_key.is_empty()
+        || state.livekit_api_secret.is_empty()
+    {
         return None;
     }
-    let media_is_local = state.livekit_url.contains("://localhost") || state.livekit_url.contains("://127.0.0.1") || state.livekit_url.contains("://[::1]");
-    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or_default().split(':').next().unwrap_or_default();
+    let media_is_local = state.livekit_url.contains("://localhost")
+        || state.livekit_url.contains("://127.0.0.1")
+        || state.livekit_url.contains("://[::1]");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default();
     let request_is_local = matches!(host, "localhost" | "127.0.0.1" | "::1");
     (!media_is_local || request_is_local).then(|| state.livekit_url.clone())
 }
@@ -361,14 +380,25 @@ fn document_html() -> Html<&'static str> {
 async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, max-age=0"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
-    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         "permissions-policy",
-        HeaderValue::from_static("camera=(self), microphone=(self), geolocation=(), payment=(), usb=()"),
+        HeaderValue::from_static(
+            "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()",
+        ),
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -404,14 +434,35 @@ async fn media_token(
     headers: HeaderMap,
 ) -> Response {
     if query.room.as_deref() != Some(state.room_id.as_str()) {
-        return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": "Room unavailable" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "Room unavailable" })),
+        )
+            .into_response();
     }
-    let encrypted_alias = headers.get("x-cinder-alias").and_then(|value| value.to_str().ok()).unwrap_or_default();
-    let socket_id = headers.get("x-cinder-socket").and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let encrypted_alias = headers
+        .get("x-cinder-alias")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let socket_id = headers
+        .get("x-cinder-socket")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
     let joined = is_base64_url(encrypted_alias, 2_048)
-        && state.aliases.read().expect("aliases lock").get(socket_id).is_some_and(|value| value == encrypted_alias);
+        && state
+            .aliases
+            .read()
+            .expect("aliases lock")
+            .get(socket_id)
+            .is_some_and(|value| value == encrypted_alias);
     if !joined {
-        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "Join the encrypted room before starting media." }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(
+                serde_json::json!({ "error": "Join the encrypted room before starting media." }),
+            ),
+        )
+            .into_response();
     }
     let Some(server_url) = media_url_for_request(&state, &headers) else {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({
@@ -419,18 +470,23 @@ async fn media_token(
         }))).into_response();
     };
     let Some(participant_token) = create_media_token(&state, encrypted_alias, socket_id) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({ "error": "Media authorization failed." }))).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": "Media authorization failed." })),
+        )
+            .into_response();
     };
-    (StatusCode::CREATED, axum::Json(serde_json::json!({
-        "serverUrl": server_url,
-        "participantToken": participant_token
-    }))).into_response()
+    (
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "serverUrl": server_url,
+            "participantToken": participant_token
+        })),
+    )
+        .into_response()
 }
 
-async fn file_list(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<RoomQuery>,
-) -> Response {
+async fn file_list(State(state): State<Arc<AppState>>, Query(query): Query<RoomQuery>) -> Response {
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
     }
@@ -450,7 +506,9 @@ async fn upload_file(
     request: axum::extract::Request,
 ) -> Response {
     let headers: &HeaderMap = request.headers();
-    let room = headers.get("x-cinder-room").and_then(|value| value.to_str().ok());
+    let room = headers
+        .get("x-cinder-room")
+        .and_then(|value| value.to_str().ok());
     let encrypted_meta = headers
         .get("x-cinder-meta")
         .and_then(|value| value.to_str().ok());
@@ -465,7 +523,10 @@ async fn upload_file(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     if declared_size > state.max_file_bytes + 28 {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Encrypted file exceeds this room's limit")
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Encrypted file exceeds this room's limit",
+        )
             .into_response();
     }
     if state
@@ -475,24 +536,57 @@ async fn upload_file(
         })
         .is_err()
     {
-        return (StatusCode::TOO_MANY_REQUESTS, "All encrypted upload lanes are busy. Try again shortly.").into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "All encrypted upload lanes are busy. Try again shortly.",
+        )
+            .into_response();
     }
-    let mut guard = UploadGuard { state: state.clone(), reserved_bytes: 0, reserved_file: false, committed: false };
+    let mut guard = UploadGuard {
+        state: state.clone(),
+        reserved_bytes: 0,
+        reserved_file: false,
+        committed: false,
+    };
     let encrypted_meta = encrypted_meta.unwrap_or_default().to_owned();
     let Ok(body) = to_bytes(request.into_body(), state.max_file_bytes + 28).await else {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Encrypted file exceeds this room's limit").into_response();
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Encrypted file exceeds this room's limit",
+        )
+            .into_response();
     };
     if body.len() < 29 {
         return (StatusCode::BAD_REQUEST, "Invalid encrypted upload").into_response();
     }
-    if state.reserved_files.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| (value < state.max_files).then_some(value + 1)).is_err() {
-        return (StatusCode::INSUFFICIENT_STORAGE, "This room reached its temporary file limit.").into_response();
+    if state
+        .reserved_files
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            (value < state.max_files).then_some(value + 1)
+        })
+        .is_err()
+    {
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "This room reached its temporary file limit.",
+        )
+            .into_response();
     }
     guard.reserved_file = true;
-    if state.stored_ciphertext_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-        value.checked_add(body.len()).filter(|next| *next <= state.max_room_storage_bytes)
-    }).is_err() {
-        return (StatusCode::INSUFFICIENT_STORAGE, "This room reached its temporary storage limit.").into_response();
+    if state
+        .stored_ciphertext_bytes
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            value
+                .checked_add(body.len())
+                .filter(|next| *next <= state.max_room_storage_bytes)
+        })
+        .is_err()
+    {
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "This room reached its temporary storage limit.",
+        )
+            .into_response();
     }
     guard.reserved_bytes = body.len();
 
@@ -540,12 +634,17 @@ async fn download_file(
         HeaderValue::from_static("application/octet-stream"),
     );
     if let Ok(length) = HeaderValue::from_str(&file.public.encrypted_size.to_string()) {
-        response.headers_mut().insert(header::CONTENT_LENGTH, length);
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, length);
     }
     response
 }
 
-async fn static_asset(State(state): State<Arc<AppState>>, AxumPath(name): AxumPath<String>) -> Response {
+async fn static_asset(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
     if name != "app.js" && name != "app.css" && name != "e2ee-worker.js" {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -560,7 +659,10 @@ async fn static_asset(State(state): State<Arc<AppState>>, AxumPath(name): AxumPa
     ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
 }
 
-async fn room_page(State(state): State<Arc<AppState>>, AxumPath(room): AxumPath<String>) -> Response {
+async fn room_page(
+    State(state): State<Arc<AppState>>,
+    AxumPath(room): AxumPath<String>,
+) -> Response {
     if room != state.room_id {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
     }
@@ -586,29 +688,50 @@ fn rate_allowed(window: &Mutex<RateWindow>, maximum: u32) -> bool {
 }
 
 async fn stop_active_screen(state: &AppState, io: &SocketIo, reason: &'static str) {
-    let removed = state.active_screen.lock().expect("screen lock").take().is_some();
+    let removed = state
+        .active_screen
+        .lock()
+        .expect("screen lock")
+        .take()
+        .is_some();
     if removed {
         io.emit("screen:stop", &StopEvent { reason }).await.ok();
     }
 }
 
 fn presence_snapshot(state: &AppState) -> Vec<PresenceItem> {
-    state.aliases.read().expect("aliases lock").iter().map(|(id, encrypted_alias)| PresenceItem {
-        id: id.clone(),
-        encrypted_alias: encrypted_alias.clone(),
-    }).collect()
+    state
+        .aliases
+        .read()
+        .expect("aliases lock")
+        .iter()
+        .map(|(id, encrypted_alias)| PresenceItem {
+            id: id.clone(),
+            encrypted_alias: encrypted_alias.clone(),
+        })
+        .collect()
 }
 
 fn pending_snapshot(state: &AppState) -> Vec<PendingItem> {
-    state.pending_aliases.read().expect("pending aliases lock").iter().map(|(id, encrypted_alias)| PendingItem {
-        id: id.clone(),
-        encrypted_alias: encrypted_alias.clone(),
-    }).collect()
+    state
+        .pending_aliases
+        .read()
+        .expect("pending aliases lock")
+        .iter()
+        .map(|(id, encrypted_alias)| PendingItem {
+            id: id.clone(),
+            encrypted_alias: encrypted_alias.clone(),
+        })
+        .collect()
 }
 
 fn emit_pending(state: &AppState) {
     let pending = pending_snapshot(state);
-    let owner_ids = state.owner_sockets.read().expect("owner sockets lock").clone();
+    let owner_ids = state
+        .owner_sockets
+        .read()
+        .expect("owner sockets lock")
+        .clone();
     let sockets = state.sockets.read().expect("sockets lock");
     for owner_id in owner_ids {
         if let Some(socket) = sockets.get(&owner_id) {
@@ -618,20 +741,63 @@ fn emit_pending(state: &AppState) {
 }
 
 fn is_admitted(state: &AppState, socket_id: &str) -> bool {
-    state.aliases.read().expect("aliases lock").contains_key(socket_id)
+    state
+        .aliases
+        .read()
+        .expect("aliases lock")
+        .contains_key(socket_id)
 }
 
-async fn admit_socket(state: &AppState, io: &SocketIo, socket: &SocketRef, encrypted_alias: String) {
+async fn admit_socket(
+    state: &AppState,
+    io: &SocketIo,
+    socket: &SocketRef,
+    encrypted_alias: String,
+) {
     let socket_id = socket.id.to_string();
-    state.pending_aliases.write().expect("pending aliases lock").remove(&socket_id);
-    state.aliases.write().expect("aliases lock").insert(socket_id, encrypted_alias);
-    socket.emit("admission:admitted", &AdmissionState { locked: state.admission_locked.load(Ordering::SeqCst) }).ok();
-    socket.emit("messages:init", &state.messages.read().expect("messages lock").clone()).ok();
-    socket.emit("meeting:signals:init", &state.meeting_signals.read().expect("meeting signals lock").clone()).ok();
-    let screen_state = state.active_screen.lock().expect("screen lock").as_ref().map(|screen| ScreenState {
-        start: screen.start.clone(),
-        chunks: screen.chunks.clone(),
-    });
+    state
+        .pending_aliases
+        .write()
+        .expect("pending aliases lock")
+        .remove(&socket_id);
+    state
+        .aliases
+        .write()
+        .expect("aliases lock")
+        .insert(socket_id, encrypted_alias);
+    socket
+        .emit(
+            "admission:admitted",
+            &AdmissionState {
+                locked: state.admission_locked.load(Ordering::SeqCst),
+            },
+        )
+        .ok();
+    socket
+        .emit(
+            "messages:init",
+            &state.messages.read().expect("messages lock").clone(),
+        )
+        .ok();
+    socket
+        .emit(
+            "meeting:signals:init",
+            &state
+                .meeting_signals
+                .read()
+                .expect("meeting signals lock")
+                .clone(),
+        )
+        .ok();
+    let screen_state = state
+        .active_screen
+        .lock()
+        .expect("screen lock")
+        .as_ref()
+        .map(|screen| ScreenState {
+            start: screen.start.clone(),
+            chunks: screen.chunks.clone(),
+        });
     if let Some(screen_state) = screen_state {
         socket.emit("screen:state", &screen_state).ok();
     }
@@ -652,14 +818,29 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     socket.disconnect().ok();
                     return;
                 }
-                if state.connections.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| (value < state.max_participants).then_some(value + 1)).is_err() {
-                    socket.emit("room:error", &format!("Room is full ({} participants).", state.max_participants)).ok();
+                if state
+                    .connections
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                        (value < state.max_participants).then_some(value + 1)
+                    })
+                    .is_err()
+                {
+                    socket
+                        .emit(
+                            "room:error",
+                            &format!("Room is full ({} participants).", state.max_participants),
+                        )
+                        .ok();
                     socket.disconnect().ok();
                     return;
                 }
 
                 let socket_id = socket.id.to_string();
-                state.sockets.write().expect("sockets lock").insert(socket_id.clone(), socket.clone());
+                state
+                    .sockets
+                    .write()
+                    .expect("sockets lock")
+                    .insert(socket_id.clone(), socket.clone());
                 let message_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let meeting_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let screen_rate = Arc::new(Mutex::new(RateWindow::default()));
@@ -685,12 +866,23 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 socket.emit("room:error", "Invalid encrypted alias.").ok();
                                 return;
                             }
-                            let is_owner = payload.owner_token.as_deref().is_some_and(|token| owner_matches(&state, token));
+                            let is_owner = payload
+                                .owner_token
+                                .as_deref()
+                                .is_some_and(|token| owner_matches(&state, token));
                             if is_owner {
-                                state.owner_sockets.write().expect("owner sockets lock").insert(socket.id.to_string());
+                                state
+                                    .owner_sockets
+                                    .write()
+                                    .expect("owner sockets lock")
+                                    .insert(socket.id.to_string());
                             }
                             if state.admission_locked.load(Ordering::SeqCst) && !is_owner {
-                                state.pending_aliases.write().expect("pending aliases lock").insert(socket.id.to_string(), payload.encrypted_alias);
+                                state
+                                    .pending_aliases
+                                    .write()
+                                    .expect("pending aliases lock")
+                                    .insert(socket.id.to_string(), payload.encrypted_alias);
                                 socket.emit("admission:waiting", &()).ok();
                                 emit_pending(&state);
                                 return;
@@ -709,11 +901,22 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let io = admission_lock_io.clone();
                         async move {
                             if !owner_matches(&state, &payload.owner_token) {
-                                socket.emit("room:error", "Only the host can change admission.").ok();
+                                socket
+                                    .emit("room:error", "Only the host can change admission.")
+                                    .ok();
                                 return;
                             }
-                            state.admission_locked.store(payload.locked, Ordering::SeqCst);
-                            io.emit("admission:state", &AdmissionState { locked: payload.locked }).await.ok();
+                            state
+                                .admission_locked
+                                .store(payload.locked, Ordering::SeqCst);
+                            io.emit(
+                                "admission:state",
+                                &AdmissionState {
+                                    locked: payload.locked,
+                                },
+                            )
+                            .await
+                            .ok();
                         }
                     },
                 );
@@ -727,19 +930,39 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let io = admission_decision_io.clone();
                         async move {
                             if !owner_matches(&state, &payload.owner_token) {
-                                socket.emit("room:error", "Invalid admission decision.").ok();
+                                socket
+                                    .emit("room:error", "Invalid admission decision.")
+                                    .ok();
                                 return;
                             }
-                            let encrypted_alias = state.pending_aliases.write().expect("pending aliases lock").remove(&payload.socket_id);
-                            let target = state.sockets.read().expect("sockets lock").get(&payload.socket_id).cloned();
-                            let (Some(encrypted_alias), Some(target)) = (encrypted_alias, target) else {
+                            let encrypted_alias = state
+                                .pending_aliases
+                                .write()
+                                .expect("pending aliases lock")
+                                .remove(&payload.socket_id);
+                            let target = state
+                                .sockets
+                                .read()
+                                .expect("sockets lock")
+                                .get(&payload.socket_id)
+                                .cloned();
+                            let (Some(encrypted_alias), Some(target)) = (encrypted_alias, target)
+                            else {
                                 emit_pending(&state);
                                 return;
                             };
                             if payload.allow {
                                 admit_socket(&state, &io, &target, encrypted_alias).await;
                             } else {
-                                target.emit("moderation:command", &ModerationEvent { command: "remove", reason: "The host declined this request." }).ok();
+                                target
+                                    .emit(
+                                        "moderation:command",
+                                        &ModerationEvent {
+                                            command: "remove",
+                                            reason: "The host declined this request.",
+                                        },
+                                    )
+                                    .ok();
                                 target.disconnect().ok();
                                 emit_pending(&state);
                             }
@@ -753,18 +976,44 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     move |socket: SocketRef, Data(payload): Data<ModerationPayload>| {
                         let state = moderation_state.clone();
                         async move {
-                            if !owner_matches(&state, &payload.owner_token) || !matches!(payload.command.as_str(), "mute" | "remove") {
+                            if !owner_matches(&state, &payload.owner_token)
+                                || !matches!(payload.command.as_str(), "mute" | "remove")
+                            {
                                 socket.emit("room:error", "Invalid host action.").ok();
                                 return;
                             }
-                            if state.owner_sockets.read().expect("owner sockets lock").contains(&payload.target) {
+                            if state
+                                .owner_sockets
+                                .read()
+                                .expect("owner sockets lock")
+                                .contains(&payload.target)
+                            {
                                 return;
                             }
-                            let target = state.sockets.read().expect("sockets lock").get(&payload.target).cloned();
+                            let target = state
+                                .sockets
+                                .read()
+                                .expect("sockets lock")
+                                .get(&payload.target)
+                                .cloned();
                             let Some(target) = target else { return };
-                            let reason = if payload.command == "mute" { "The host muted your microphone." } else { "The host removed you from the room." };
-                            target.emit("moderation:command", &ModerationEvent { command: &payload.command, reason }).ok();
-                            if payload.command == "remove" { target.disconnect().ok(); }
+                            let reason = if payload.command == "mute" {
+                                "The host muted your microphone."
+                            } else {
+                                "The host removed you from the room."
+                            };
+                            target
+                                .emit(
+                                    "moderation:command",
+                                    &ModerationEvent {
+                                        command: &payload.command,
+                                        reason,
+                                    },
+                                )
+                                .ok();
+                            if payload.command == "remove" {
+                                target.disconnect().ok();
+                            }
                         }
                     },
                 );
@@ -779,7 +1028,9 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let rate = message_rate.clone();
                         async move {
                             if !is_admitted(&state, &socket.id.to_string()) {
-                                socket.emit("room:error", "Wait for the host to admit you.").ok();
+                                socket
+                                    .emit("room:error", "Wait for the host to admit you.")
+                                    .ok();
                                 return;
                             }
                             if !rate_allowed(&rate, 30) {
@@ -816,20 +1067,33 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let io = meeting_io.clone();
                         let rate = meeting_rate.clone();
                         async move {
-                            if !is_admitted(&state, &socket.id.to_string()) { return; }
+                            if !is_admitted(&state, &socket.id.to_string()) {
+                                return;
+                            }
                             if !rate_allowed(&rate, 40) {
-                                socket.emit("room:error", "Meeting activity is moving too quickly.").ok();
+                                socket
+                                    .emit("room:error", "Meeting activity is moving too quickly.")
+                                    .ok();
                                 return;
                             }
                             if !is_base64_url(&payload.encrypted, 32_000) {
-                                socket.emit("room:error", "Invalid encrypted meeting activity.").ok();
+                                socket
+                                    .emit("room:error", "Invalid encrypted meeting activity.")
+                                    .ok();
                                 return;
                             }
-                            let signal = MeetingSignal { id: Uuid::new_v4().to_string(), encrypted: payload.encrypted, created_at: now_ms() };
+                            let signal = MeetingSignal {
+                                id: Uuid::new_v4().to_string(),
+                                encrypted: payload.encrypted,
+                                created_at: now_ms(),
+                            };
                             {
-                                let mut signals = state.meeting_signals.write().expect("meeting signals lock");
+                                let mut signals =
+                                    state.meeting_signals.write().expect("meeting signals lock");
                                 signals.push(signal.clone());
-                                if signals.len() > 150 { signals.remove(0); }
+                                if signals.len() > 150 {
+                                    signals.remove(0);
+                                }
                             }
                             io.emit("meeting:signal", &signal).await.ok();
                         }
@@ -845,7 +1109,9 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let io = destroy_io.clone();
                         async move {
                             if !owner_matches(&state, &payload.owner_token) {
-                                socket.emit("room:error", "Only the host can destroy this room.").ok();
+                                socket
+                                    .emit("room:error", "Only the host can destroy this room.")
+                                    .ok();
                                 return;
                             }
                             io.emit("room:destroyed", &()).await.ok();
@@ -860,42 +1126,77 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                 let presenter_id = socket_id.clone();
                 socket.on(
                     "screen:start",
-                    move |socket: SocketRef, Data(payload): Data<EncryptedPayload>, ack: AckSender| {
+                    move |socket: SocketRef,
+                          Data(payload): Data<EncryptedPayload>,
+                          ack: AckSender| {
                         let state = start_state.clone();
                         let io = start_io.clone();
                         let presenter = presenter_id.clone();
                         async move {
                             if !is_admitted(&state, &socket.id.to_string()) {
-                                ack.send(&AckResult { ok: false, error: Some("Wait for the host to admit you.") }).ok();
+                                ack.send(&AckResult {
+                                    ok: false,
+                                    error: Some("Wait for the host to admit you."),
+                                })
+                                .ok();
                                 return;
                             }
                             if !is_base64_url(&payload.encrypted, 4_096) {
-                                ack.send(&AckResult { ok: false, error: Some("Invalid encrypted presentation metadata.") }).ok();
+                                ack.send(&AckResult {
+                                    ok: false,
+                                    error: Some("Invalid encrypted presentation metadata."),
+                                })
+                                .ok();
                                 return;
                             }
-                            let start = ScreenStart { id: Uuid::new_v4().to_string(), encrypted: payload.encrypted, created_at: now_ms() };
+                            let start = ScreenStart {
+                                id: Uuid::new_v4().to_string(),
+                                encrypted: payload.encrypted,
+                                created_at: now_ms(),
+                            };
                             let stream_id = start.id.clone();
                             let started = {
                                 let mut active = state.active_screen.lock().expect("screen lock");
                                 if active.is_some() {
                                     false
                                 } else {
-                                    *active = Some(ActiveScreen { presenter_socket_id: presenter, start: start.clone(), chunks: Vec::new(), encrypted_bytes: 0 });
+                                    *active = Some(ActiveScreen {
+                                        presenter_socket_id: presenter,
+                                        start: start.clone(),
+                                        chunks: Vec::new(),
+                                        encrypted_bytes: 0,
+                                    });
                                     true
                                 }
                             };
                             if !started {
-                                ack.send(&AckResult { ok: false, error: Some("Someone is already presenting.") }).ok();
+                                ack.send(&AckResult {
+                                    ok: false,
+                                    error: Some("Someone is already presenting."),
+                                })
+                                .ok();
                                 return;
                             }
                             io.emit("screen:start", &start).await.ok();
-                            ack.send(&AckResult { ok: true, error: None }).ok();
+                            ack.send(&AckResult {
+                                ok: true,
+                                error: None,
+                            })
+                            .ok();
                             let timeout_state = state.clone();
                             let timeout_io = io.clone();
                             tokio::spawn(async move {
-                                sleep(Duration::from_secs(timeout_state.screen_max_minutes * 60)).await;
-                                let is_same = timeout_state.active_screen.lock().expect("screen lock").as_ref().is_some_and(|screen| screen.start.id == stream_id);
-                                if is_same { stop_active_screen(&timeout_state, &timeout_io, "limit").await; }
+                                sleep(Duration::from_secs(timeout_state.screen_max_minutes * 60))
+                                    .await;
+                                let is_same = timeout_state
+                                    .active_screen
+                                    .lock()
+                                    .expect("screen lock")
+                                    .as_ref()
+                                    .is_some_and(|screen| screen.start.id == stream_id);
+                                if is_same {
+                                    stop_active_screen(&timeout_state, &timeout_io, "limit").await;
+                                }
                             });
                         }
                     },
@@ -912,22 +1213,33 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let rate = screen_rate.clone();
                         let presenter = chunk_presenter_id.clone();
                         async move {
-                            if !rate_allowed(&rate, 30) || !is_base64_url(&payload.encrypted, 2_000_000) {
+                            if !rate_allowed(&rate, 30)
+                                || !is_base64_url(&payload.encrypted, 2_000_000)
+                            {
                                 stop_active_screen(&state, &io, "limit").await;
                                 return;
                             }
                             let outcome = {
                                 let mut active = state.active_screen.lock().expect("screen lock");
                                 active.as_mut().and_then(|screen| {
-                                    if screen.presenter_socket_id != presenter { return None; }
-                                    let chunk = ScreenChunk { stream_id: screen.start.id.clone(), sequence: screen.chunks.len(), encrypted: payload.encrypted };
+                                    if screen.presenter_socket_id != presenter {
+                                        return None;
+                                    }
+                                    let chunk = ScreenChunk {
+                                        stream_id: screen.start.id.clone(),
+                                        sequence: screen.chunks.len(),
+                                        encrypted: payload.encrypted,
+                                    };
                                     screen.encrypted_bytes += chunk.encrypted.len();
                                     screen.chunks.push(chunk.clone());
-                                    let exceeded = screen.chunks.len() > 500 || screen.encrypted_bytes > 64 * 1024 * 1024;
+                                    let exceeded = screen.chunks.len() > 500
+                                        || screen.encrypted_bytes > 64 * 1024 * 1024;
                                     Some((chunk, exceeded))
                                 })
                             };
-                            let Some((chunk, exceeded)) = outcome else { return };
+                            let Some((chunk, exceeded)) = outcome else {
+                                return;
+                            };
                             if exceeded {
                                 stop_active_screen(&state, &io, "limit").await;
                                 return;
@@ -945,8 +1257,15 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     let io = stop_io.clone();
                     let presenter = stop_presenter_id.clone();
                     async move {
-                        let is_presenter = state.active_screen.lock().expect("screen lock").as_ref().is_some_and(|screen| screen.presenter_socket_id == presenter);
-                        if is_presenter { stop_active_screen(&state, &io, "presenter").await; }
+                        let is_presenter = state
+                            .active_screen
+                            .lock()
+                            .expect("screen lock")
+                            .as_ref()
+                            .is_some_and(|screen| screen.presenter_socket_id == presenter);
+                        if is_presenter {
+                            stop_active_screen(&state, &io, "presenter").await;
+                        }
                     }
                 });
 
@@ -959,16 +1278,29 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                         let presenter = media_presenter_id.clone();
                         async move {
                             if !is_admitted(&state, &socket.id.to_string()) {
-                                ack.send(&AckResult { ok: false, error: Some("Wait for the host to admit you.") }).ok();
+                                ack.send(&AckResult {
+                                    ok: false,
+                                    error: Some("Wait for the host to admit you."),
+                                })
+                                .ok();
                                 return;
                             }
-                            let mut active = state.media_presenter.lock().expect("media presenter lock");
+                            let mut active =
+                                state.media_presenter.lock().expect("media presenter lock");
                             if active.as_ref().is_some_and(|current| current != &presenter) {
-                                ack.send(&AckResult { ok: false, error: Some("Someone is already presenting.") }).ok();
+                                ack.send(&AckResult {
+                                    ok: false,
+                                    error: Some("Someone is already presenting."),
+                                })
+                                .ok();
                                 return;
                             }
                             *active = Some(presenter);
-                            ack.send(&AckResult { ok: true, error: None }).ok();
+                            ack.send(&AckResult {
+                                ok: true,
+                                error: None,
+                            })
+                            .ok();
                         }
                     },
                 );
@@ -979,8 +1311,11 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     let state = media_stop_state.clone();
                     let presenter = media_stop_id.clone();
                     async move {
-                        let mut active = state.media_presenter.lock().expect("media presenter lock");
-                        if active.as_ref() == Some(&presenter) { *active = None; }
+                        let mut active =
+                            state.media_presenter.lock().expect("media presenter lock");
+                        if active.as_ref() == Some(&presenter) {
+                            *active = None;
+                        }
                     }
                 });
 
@@ -992,16 +1327,42 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     async move {
                         let disconnected_id = socket.id.to_string();
                         state.connections.fetch_sub(1, Ordering::SeqCst);
-                        let was_presenter = state.active_screen.lock().expect("screen lock").as_ref().is_some_and(|screen| screen.presenter_socket_id == disconnected_id);
-                        if was_presenter { stop_active_screen(&state, &io, "disconnected").await; }
-                        {
-                            let mut active = state.media_presenter.lock().expect("media presenter lock");
-                            if active.as_ref() == Some(&disconnected_id) { *active = None; }
+                        let was_presenter = state
+                            .active_screen
+                            .lock()
+                            .expect("screen lock")
+                            .as_ref()
+                            .is_some_and(|screen| screen.presenter_socket_id == disconnected_id);
+                        if was_presenter {
+                            stop_active_screen(&state, &io, "disconnected").await;
                         }
-                        state.aliases.write().expect("aliases lock").remove(&disconnected_id);
-                        state.pending_aliases.write().expect("pending aliases lock").remove(&disconnected_id);
-                        state.owner_sockets.write().expect("owner sockets lock").remove(&disconnected_id);
-                        state.sockets.write().expect("sockets lock").remove(&disconnected_id);
+                        {
+                            let mut active =
+                                state.media_presenter.lock().expect("media presenter lock");
+                            if active.as_ref() == Some(&disconnected_id) {
+                                *active = None;
+                            }
+                        }
+                        state
+                            .aliases
+                            .write()
+                            .expect("aliases lock")
+                            .remove(&disconnected_id);
+                        state
+                            .pending_aliases
+                            .write()
+                            .expect("pending aliases lock")
+                            .remove(&disconnected_id);
+                        state
+                            .owner_sockets
+                            .write()
+                            .expect("owner sockets lock")
+                            .remove(&disconnected_id);
+                        state
+                            .sockets
+                            .write()
+                            .expect("sockets lock")
+                            .remove(&disconnected_id);
                         io.emit("presence", &presence_snapshot(&state)).await.ok();
                         emit_pending(&state);
                     }
@@ -1046,7 +1407,9 @@ fn launch_cloudflare(state: Arc<AppState>, io: SocketIo, owner_token: String) {
         {
             Ok(child) => child,
             Err(_) => {
-                println!("Normal-browser route unavailable: install cloudflared or use CINDER_ROUTES=local.");
+                println!(
+                    "Normal-browser route unavailable: install cloudflared or use CINDER_ROUTES=local."
+                );
                 return;
             }
         };
@@ -1107,7 +1470,9 @@ fn launch_tor(state: Arc<AppState>, io: SocketIo, owner_token: String, port: u16
         {
             Ok(child) => child,
             Err(_) => {
-                println!("Tor route unavailable: install the Tor daemon or use CINDER_ROUTES=local.");
+                println!(
+                    "Tor route unavailable: install the Tor daemon or use CINDER_ROUTES=local."
+                );
                 return;
             }
         };
@@ -1143,7 +1508,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_participants = env_number("MAX_PARTICIPANTS", 50, 2, 500) as usize;
     let max_concurrent_uploads = env_number("MAX_CONCURRENT_UPLOADS", 4, 1, 32) as usize;
     let max_files = env_number("MAX_FILES", 200, 1, 10_000) as usize;
-    let max_room_storage_mb = env_number("MAX_ROOM_STORAGE_MB", 1_024, max_file_mb as u64, 102_400) as usize;
+    let max_room_storage_mb =
+        env_number("MAX_ROOM_STORAGE_MB", 1_024, max_file_mb as u64, 102_400) as usize;
     let room_ttl_minutes = env_number("ROOM_TTL_MINUTES", 180, 5, 10_080);
     let screen_max_minutes = env_number("SCREEN_MAX_MINUTES", 5, 1, 30);
     let route_mode = env::var("CINDER_ROUTES").unwrap_or_else(|_| "both".to_owned());
@@ -1226,8 +1592,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nCinder Room v0.9.0 Rust relay is live");
     println!("Host local link: http://localhost:{port}/room/{room_id}#o={owner_token}");
     println!("Open a host link, choose an alias, then use Invite to copy guest links.");
-    println!("The room will self-destruct after {room_ttl_minutes} minutes. Press Ctrl+C to end it now.\n");
-    println!("Guardrails: {max_participants} participants, {max_concurrent_uploads} concurrent uploads, {max_files} files, {max_room_storage_mb} MB ciphertext storage.\n");
+    println!(
+        "The room will self-destruct after {room_ttl_minutes} minutes. Press Ctrl+C to end it now.\n"
+    );
+    println!(
+        "Guardrails: {max_participants} participants, {max_concurrent_uploads} concurrent uploads, {max_files} files, {max_room_storage_mb} MB ciphertext storage.\n"
+    );
 
     if route_mode == "both" || route_mode.contains("cloudflare") {
         launch_cloudflare(state.clone(), io.clone(), owner_token.clone());
@@ -1292,6 +1662,10 @@ mod tests {
     fn random_room_tokens_are_url_safe() {
         let token = random_token(32);
         assert!(token.len() >= 40);
-        assert!(token.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'));
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        );
     }
 }

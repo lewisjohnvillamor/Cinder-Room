@@ -20,7 +20,7 @@
     "room": "npm run build:room-ui && node scripts/run-room.mjs",
     "room:node": "npm run build:room-ui && tsx server/index.ts",
     "room:bundled": "npm run build:room-ui && npm run build:relay && node server-dist/index.cjs",
-    "test:room": "npm run build:room-ui && cargo test --manifest-path rust-server/Cargo.toml && node --test tests/rust-relay.test.mjs",
+    "test:room": "npm run build:room-ui && cargo test --locked --manifest-path rust-server/Cargo.toml && node --test tests/rust-relay.test.mjs",
     "test:room:node": "npm run build:room-ui && node --test tests/room-server.test.mjs",
     "test:room:bundled": "npm run build:room-ui && npm run build:relay && CINDER_TEST_BUNDLED=true node --test tests/room-server.test.mjs"
   },

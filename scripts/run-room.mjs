@@ -74,7 +74,7 @@ if (startConfiguredMedia) {
 const useNodeRelay = process.env.CINDER_RELAY === "node";
 const relay = useNodeRelay
   ? start(process.execPath, ["--import", "tsx", "server/index.ts"], { env: relayEnvironment })
-  : start("cargo", ["run", "--release", "--manifest-path", "rust-server/Cargo.toml"], { env: relayEnvironment });
+  : start("cargo", ["run", "--release", "--locked", "--manifest-path", "rust-server/Cargo.toml"], { env: relayEnvironment });
 console.log(`Cinder is using the ${useNodeRelay ? "Node compatibility" : "Rust"} relay.`);
 relay.once("exit", (code) => stop(code ?? 1));
 mediaProcess?.once("exit", (code) => {
