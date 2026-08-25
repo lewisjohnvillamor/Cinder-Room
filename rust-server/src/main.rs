@@ -795,12 +795,13 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 encrypted: payload.encrypted,
                                 created_at: now_ms(),
                             };
-                            let mut messages = state.messages.write().expect("messages lock");
-                            messages.push(message.clone());
-                            if messages.len() > 500 {
-                                messages.remove(0);
+                            {
+                                let mut messages = state.messages.write().expect("messages lock");
+                                messages.push(message.clone());
+                                if messages.len() > 500 {
+                                    messages.remove(0);
+                                }
                             }
-                            drop(messages);
                             io.emit("message:new", &message).await.ok();
                         }
                     },
@@ -825,10 +826,11 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 return;
                             }
                             let signal = MeetingSignal { id: Uuid::new_v4().to_string(), encrypted: payload.encrypted, created_at: now_ms() };
-                            let mut signals = state.meeting_signals.write().expect("meeting signals lock");
-                            signals.push(signal.clone());
-                            if signals.len() > 150 { signals.remove(0); }
-                            drop(signals);
+                            {
+                                let mut signals = state.meeting_signals.write().expect("meeting signals lock");
+                                signals.push(signal.clone());
+                                if signals.len() > 150 { signals.remove(0); }
+                            }
                             io.emit("meeting:signal", &signal).await.ok();
                         }
                     },
@@ -871,15 +873,21 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 ack.send(&AckResult { ok: false, error: Some("Invalid encrypted presentation metadata.") }).ok();
                                 return;
                             }
-                            let mut active = state.active_screen.lock().expect("screen lock");
-                            if active.is_some() {
+                            let start = ScreenStart { id: Uuid::new_v4().to_string(), encrypted: payload.encrypted, created_at: now_ms() };
+                            let stream_id = start.id.clone();
+                            let started = {
+                                let mut active = state.active_screen.lock().expect("screen lock");
+                                if active.is_some() {
+                                    false
+                                } else {
+                                    *active = Some(ActiveScreen { presenter_socket_id: presenter, start: start.clone(), chunks: Vec::new(), encrypted_bytes: 0 });
+                                    true
+                                }
+                            };
+                            if !started {
                                 ack.send(&AckResult { ok: false, error: Some("Someone is already presenting.") }).ok();
                                 return;
                             }
-                            let start = ScreenStart { id: Uuid::new_v4().to_string(), encrypted: payload.encrypted, created_at: now_ms() };
-                            let stream_id = start.id.clone();
-                            *active = Some(ActiveScreen { presenter_socket_id: presenter, start: start.clone(), chunks: Vec::new(), encrypted_bytes: 0 });
-                            drop(active);
                             io.emit("screen:start", &start).await.ok();
                             ack.send(&AckResult { ok: true, error: None }).ok();
                             let timeout_state = state.clone();
@@ -908,18 +916,22 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 stop_active_screen(&state, &io, "limit").await;
                                 return;
                             }
-                            let mut active = state.active_screen.lock().expect("screen lock");
-                            let Some(screen) = active.as_mut() else { return };
-                            if screen.presenter_socket_id != presenter { return; }
-                            let chunk = ScreenChunk { stream_id: screen.start.id.clone(), sequence: screen.chunks.len(), encrypted: payload.encrypted };
-                            screen.encrypted_bytes += chunk.encrypted.len();
-                            screen.chunks.push(chunk.clone());
-                            if screen.chunks.len() > 500 || screen.encrypted_bytes > 64 * 1024 * 1024 {
-                                drop(active);
+                            let outcome = {
+                                let mut active = state.active_screen.lock().expect("screen lock");
+                                active.as_mut().and_then(|screen| {
+                                    if screen.presenter_socket_id != presenter { return None; }
+                                    let chunk = ScreenChunk { stream_id: screen.start.id.clone(), sequence: screen.chunks.len(), encrypted: payload.encrypted };
+                                    screen.encrypted_bytes += chunk.encrypted.len();
+                                    screen.chunks.push(chunk.clone());
+                                    let exceeded = screen.chunks.len() > 500 || screen.encrypted_bytes > 64 * 1024 * 1024;
+                                    Some((chunk, exceeded))
+                                })
+                            };
+                            let Some((chunk, exceeded)) = outcome else { return };
+                            if exceeded {
                                 stop_active_screen(&state, &io, "limit").await;
                                 return;
                             }
-                            drop(active);
                             socket.broadcast().emit("screen:chunk", &chunk).await.ok();
                         }
                     },
@@ -1000,16 +1012,17 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
 }
 
 async fn add_route(state: &AppState, io: &SocketIo, route: PublicRoute) {
-    let mut routes = state.routes.write().expect("routes lock");
-    if routes
-        .iter()
-        .any(|item| item.r#type == route.r#type && item.base_url == route.base_url)
-    {
-        return;
-    }
-    routes.push(route.clone());
-    let snapshot = routes.clone();
-    drop(routes);
+    let snapshot = {
+        let mut routes = state.routes.write().expect("routes lock");
+        if routes
+            .iter()
+            .any(|item| item.r#type == route.r#type && item.base_url == route.base_url)
+        {
+            return;
+        }
+        routes.push(route.clone());
+        routes.clone()
+    };
     io.emit("routes", &snapshot).await.ok();
     println!(
         "Guest {} route: {}/room/{}#k=<copied-from-host-screen>",
