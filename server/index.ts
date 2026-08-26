@@ -143,6 +143,11 @@ function documentHtml() {
     <meta name="referrer" content="no-referrer" />
     <title>Cinder Room</title>
     <meta name="description" content="An end-to-end encrypted room that leaves when you do." />
+    <meta name="theme-color" content="#141310" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body><div id="root"></div><script type="module" src="/app.js"></script></body>
@@ -161,7 +166,7 @@ app.use((_request, response, next) => {
   response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   response.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()");
-  response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
+  response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
   next();
 });
 
@@ -273,6 +278,9 @@ app.delete("/api/files/:id", (request, response) => {
 app.get("/app.js", (_request, response) => response.sendFile(join(UI_DIR, "app.js")));
 app.get("/app.css", (_request, response) => response.sendFile(join(UI_DIR, "app.css")));
 app.get("/e2ee-worker.js", (_request, response) => response.type("text/javascript").sendFile(join(UI_DIR, "e2ee-worker.js")));
+for (const asset of ["favicon.svg", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "manifest.webmanifest"]) {
+  app.get(`/${asset}`, (_request, response) => response.sendFile(join(UI_DIR, asset)));
+}
 app.get("/room/:room", (request, response) => {
   if (request.params.room !== roomId) return response.status(404).type("text").send("Room unavailable");
   return response.type("html").send(documentHtml());

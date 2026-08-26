@@ -50,6 +50,9 @@ test("Rust relay matches the encrypted room, admission, moderation, and media pr
   const page = await fetch(`http://127.0.0.1:${port}/room/${health.roomId}`);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Cinder Room/);
+  const favicon = await fetch(`http://127.0.0.1:${port}/favicon.svg`);
+  assert.equal(favicon.status, 200);
+  assert.match(favicon.headers.get("content-type"), /image\/svg\+xml/);
   assert.equal(page.headers.get("cache-control"), "no-store, max-age=0");
   assert.equal(page.headers.get("x-frame-options"), "DENY");
   assert.match(page.headers.get("permissions-policy"), /camera=\(self\)/);

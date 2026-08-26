@@ -46,6 +46,9 @@ test("ephemeral relay accepts opaque real-time data and encrypted files", async 
   const page = await fetch(`http://127.0.0.1:${port}/room/${health.roomId}`);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Cinder Room/);
+  const favicon = await fetch(`http://127.0.0.1:${port}/favicon.svg`);
+  assert.equal(favicon.status, 200);
+  assert.match(favicon.headers.get("content-type"), /image\/svg\+xml/);
   assert.match(page.headers.get("permissions-policy"), /camera=\(self\)/);
   assert.equal(page.headers.get("cross-origin-opener-policy"), "same-origin");
 

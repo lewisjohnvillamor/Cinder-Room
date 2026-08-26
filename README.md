@@ -25,6 +25,20 @@ Run one temporary, self-hosted room and share its capability link. Cinder Room p
 - Memory-only room state and temporary ciphertext files removed when the process exits normally
 - No accounts, analytics, database, paid API, recording, or hosted Cinder service
 
+## Practical use cases
+
+Cinder Room is designed for temporary collaboration where participants want to control the infrastructure and avoid permanent account or message history. Suitable uses include:
+
+- Confidential team, client, legal, financial, research, or incident-response meetings
+- Private presentations with encrypted media, group chat, direct conversations, and temporary files
+- Short-lived support sessions involving screen sharing, documents, or sensitive troubleshooting details
+- Coordination by journalists, nonprofits, community groups, or small teams that do not want a hosted Cinder account
+- Exchanging temporary credentials, one-time passwords, recovery codes, sensitive links, or access instructions
+
+For sensitive secret sharing, verify the recipient through a separate trusted channel, share the complete **Invite** URL privately, lock the room after the expected participants arrive, confirm their aliases, send the secret through direct chat, and destroy the room after receipt. Rotate or invalidate the credential afterward whenever possible. A dedicated audited secret manager remains the better choice for long-lived production credentials.
+
+“Encrypted” does not mean that nobody can listen under every circumstance. Cinder protects message and media content from ordinary relay, tunnel, and network observation when the software and participant devices are trustworthy. It cannot prevent an invited participant from copying or recording content, someone with the complete invitation from joining, malware or browser extensions from reading the screen, or infrastructure providers from observing connection metadata, timing, and approximate traffic sizes. See [Privacy and threat model](#privacy-and-threat-model) for the full limits.
+
 ## Start locally
 
 Requirements: Node.js 22.13+, npm, and Rust 1.94. Optional route helpers are `tor` and `cloudflared`; Cinder can download `cloudflared` automatically on first start when `CINDER_ROUTES` includes Cloudflare. Optional native group media uses `livekit-server`.

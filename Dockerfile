@@ -5,6 +5,8 @@ RUN npm ci
 COPY server ./server
 COPY components ./components
 COPY app/globals.css ./app/globals.css
+COPY public ./public
+COPY scripts/copy-room-assets.mjs ./scripts/copy-room-assets.mjs
 RUN npm run build:room-ui
 
 FROM rust:1.94-bookworm AS relay

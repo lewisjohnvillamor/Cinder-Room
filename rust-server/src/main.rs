@@ -450,6 +450,11 @@ fn document_html() -> Html<&'static str> {
     <meta name="referrer" content="no-referrer" />
     <title>Cinder Room</title>
     <meta name="description" content="An end-to-end encrypted room that leaves when you do." />
+    <meta name="theme-color" content="#141310" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body><div id="root"></div><script type="module" src="/app.js"></script></body>
@@ -484,7 +489,7 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
+        HeaderValue::from_static("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
     );
     response
 }
@@ -802,16 +807,18 @@ async fn static_asset(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
 ) -> Response {
-    if name != "app.js" && name != "app.css" && name != "e2ee-worker.js" {
+    if !matches!(name.as_str(), "app.js" | "app.css" | "e2ee-worker.js" | "favicon.svg" | "apple-touch-icon.png" | "icon-192.png" | "icon-512.png" | "manifest.webmanifest") {
         return StatusCode::NOT_FOUND.into_response();
     }
     let Ok(bytes) = tokio::fs::read(state.ui_dir.join(&name)).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Build the room UI first").into_response();
     };
-    let content_type = if name.ends_with(".js") {
-        "text/javascript; charset=utf-8"
-    } else {
-        "text/css; charset=utf-8"
+    let content_type = match name.as_str() {
+        "app.js" | "e2ee-worker.js" => "text/javascript; charset=utf-8",
+        "app.css" => "text/css; charset=utf-8",
+        "favicon.svg" => "image/svg+xml",
+        "manifest.webmanifest" => "application/manifest+json",
+        _ => "image/png",
     };
     ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
 }

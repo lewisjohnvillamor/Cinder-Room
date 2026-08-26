@@ -339,6 +339,9 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const presentingRef = useRef(false);
   const activeScreenIdRef = useRef("");
+  const presenceIdsRef = useRef<Set<string>>(new Set());
+  const presenceInitializedRef = useRef(false);
+  const joinAudioContextRef = useRef<AudioContext | null>(null);
   const mediaSourceRef = useRef<MediaSource | null>(null);
   const sourceBufferRef = useRef<SourceBuffer | null>(null);
   const screenUrlRef = useRef("");
@@ -354,6 +357,27 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     setToast(message);
     toastTimerRef.current = window.setTimeout(() => { setToast(""); toastTimerRef.current = null; }, 2200);
+  }, []);
+
+  const playJoinSound = useCallback(() => {
+    const AudioContextClass = window.AudioContext;
+    if (!AudioContextClass) return;
+    const context = joinAudioContextRef.current ?? new AudioContextClass();
+    joinAudioContextRef.current = context;
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.09, context.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.38);
+    gain.connect(context.destination);
+    for (const [frequency, delay] of [[523.25, 0], [659.25, 0.12]] as const) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, context.currentTime + delay);
+      oscillator.connect(gain);
+      oscillator.start(context.currentTime + delay);
+      oscillator.stop(context.currentTime + delay + 0.22);
+    }
+    void context.resume().catch(() => undefined);
   }, []);
 
   const openConversation = useCallback((id: string) => {
@@ -528,6 +552,14 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
       const normalized = items.map((item, index) => typeof item === "string" ? { id: `legacy-${index}`, encryptedAlias: item } : item);
       const settled = await Promise.allSettled(normalized.map(async (item) => ({ id: item.id, ...(await decryptJson<{ name: string }>(roomKey, item.encryptedAlias)) })));
       const clear = settled.flatMap((item) => item.status === "fulfilled" ? [item.value] : []);
+      const nextIds = new Set(clear.map((person) => person.id));
+      const newcomers = clear.filter((person) => person.id !== socket.id && !presenceIdsRef.current.has(person.id));
+      if (presenceInitializedRef.current && newcomers.length > 0) {
+        playJoinSound();
+        showToast(newcomers.length === 1 ? `${newcomers[0].name} joined the room.` : `${newcomers.length} people joined the room.`);
+      }
+      presenceIdsRef.current = nextIds;
+      presenceInitializedRef.current = true;
       setKeyMismatchCount(settled.length - clear.length);
       setPresence(clear);
       setBroadcasters((current) => Object.fromEntries(Object.entries(current).filter(([id]) => clear.some((person) => person.id === id))));
@@ -673,7 +705,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
       socketRef.current = null;
       setHttpCapability("");
     };
-  }, [alias, appendScreenQueue, decryptFile, decryptMessage, demo, openConversation, ownerToken, roomId, roomKey, showToast, stopLocalPresentation]);
+  }, [alias, appendScreenQueue, decryptFile, decryptMessage, demo, openConversation, ownerToken, playJoinSound, roomId, roomKey, showToast, stopLocalPresentation]);
 
   useEffect(() => {
     if (guestExitCountdown === null) return undefined;
@@ -780,6 +812,8 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
 
   async function join(event: FormEvent) {
     event.preventDefault();
+    if (!joinAudioContextRef.current && window.AudioContext) joinAudioContextRef.current = new AudioContext();
+    void joinAudioContextRef.current?.resume().catch(() => undefined);
     const clean = draftAlias.trim().slice(0, 40);
     if (!clean || !roomKey) return;
     const encrypted = await encryptJson(roomKey, { name: clean });
@@ -1208,6 +1242,10 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     setDirectUnread({});
     setFiles([]);
     setPeople([]);
+    presenceIdsRef.current = new Set();
+    presenceInitializedRef.current = false;
+    void joinAudioContextRef.current?.close();
+    joinAudioContextRef.current = null;
     setPreview(null);
     setActivePresentation(null);
     setScreenOpen(false);
