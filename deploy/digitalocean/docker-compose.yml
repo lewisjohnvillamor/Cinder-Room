@@ -19,9 +19,12 @@ services:
       - /tmp:size=320m,mode=1777
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
 
   livekit:
-    image: livekit/livekit-server:latest
+    image: livekit/livekit-server:v1.9.7
     restart: unless-stopped
     network_mode: host
     command: --config /etc/livekit.yaml
@@ -33,12 +36,13 @@ services:
       - no-new-privileges:true
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.10.2-alpine
     restart: unless-stopped
     network_mode: host
     environment:
       CINDER_DOMAIN: ${CINDER_DOMAIN}
       MEDIA_DOMAIN: ${MEDIA_DOMAIN}
+      CINDER_MAX_BODY_SIZE: ${CINDER_MAX_BODY_SIZE:-26MB}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

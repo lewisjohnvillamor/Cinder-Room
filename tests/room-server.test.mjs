@@ -10,7 +10,7 @@ async function waitForServer(child) {
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk.toString(); });
   child.stderr.on("data", (chunk) => { output += chunk.toString(); });
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`);
       if (response.ok) {
@@ -47,15 +47,19 @@ test("ephemeral relay accepts opaque real-time data and encrypted files", async 
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Cinder Room/);
   assert.match(page.headers.get("permissions-policy"), /camera=\(self\)/);
+  assert.equal(page.headers.get("cross-origin-opener-policy"), "same-origin");
 
   const socket = io(`http://127.0.0.1:${port}`, { auth: { room: health.roomId }, transports: ["websocket"] });
   context.after(() => socket.close());
   await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("connect_error", reject); });
   const encryptedAlias = "Z".repeat(32);
   const presence = new Promise((resolve) => socket.once("presence", resolve));
+  const admitted = new Promise((resolve) => socket.once("admission:admitted", resolve));
   socket.emit("room:join", { encryptedAlias, ownerToken: health.ownerToken });
   await presence;
-  const mediaResponse = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Socket": socket.id } });
+  const { httpCapability } = await admitted;
+  assert.match(httpCapability, /^[A-Za-z0-9_-]{40,}$/);
+  const mediaResponse = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": httpCapability } });
   assert.equal(mediaResponse.status, 201);
   const media = await mediaResponse.json();
   assert.equal(media.serverUrl, "ws://localhost:7880");
@@ -78,7 +82,15 @@ test("ephemeral relay accepts opaque real-time data and encrypted files", async 
   await new Promise((resolve, reject) => { viewer.once("connect", resolve); viewer.once("connect_error", reject); });
   const viewerAdmitted = new Promise((resolve) => viewer.once("admission:admitted", resolve));
   viewer.emit("room:join", { encryptedAlias: "V".repeat(32) });
-  await viewerAdmitted;
+  const { httpCapability: viewerCapability } = await viewerAdmitted;
+  const viewerGetsGroupMessage = new Promise((resolve) => viewer.once("message:new", resolve));
+  socket.emit("message:send", { encrypted: "G".repeat(32) });
+  assert.equal((await viewerGetsGroupMessage).encrypted, "G".repeat(32));
+  const hostGetsGroupReply = new Promise((resolve) => socket.once("message:new", resolve));
+  viewer.emit("message:send", { encrypted: "R".repeat(32) });
+  assert.equal((await hostGetsGroupReply).encrypted, "R".repeat(32));
+  const impersonation = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": viewerCapability } });
+  assert.equal(impersonation.status, 403);
   const mediaPresentAccepted = await new Promise((resolve) => socket.emit("media:present:start", {}, resolve));
   assert.equal(mediaPresentAccepted.ok, true);
   const competingPresenter = await new Promise((resolve) => viewer.emit("media:present:start", {}, resolve));
@@ -128,12 +140,18 @@ test("ephemeral relay accepts opaque real-time data and encrypted files", async 
   assert.equal((await stopped).reason, "presenter");
 
   const encryptedFile = new Uint8Array(64).fill(7);
-  const upload = await fetch(`http://127.0.0.1:${port}/api/files`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "B".repeat(32) }, body: encryptedFile });
+  const unauthorizedUpload = await fetch(`http://127.0.0.1:${port}/api/files`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "B".repeat(32) }, body: encryptedFile });
+  assert.equal(unauthorizedUpload.status, 403);
+  const upload = await fetch(`http://127.0.0.1:${port}/api/files`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "B".repeat(32), "X-Cinder-Capability": httpCapability }, body: encryptedFile });
   assert.equal(upload.status, 201);
   const stored = await upload.json();
-  const download = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`);
+  const unauthorizedDownload = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`);
+  assert.equal(unauthorizedDownload.status, 403);
+  const download = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`, { headers: { "X-Cinder-Capability": httpCapability } });
   assert.equal(download.status, 200);
   assert.deepEqual(new Uint8Array(await download.arrayBuffer()), encryptedFile);
-  const secondUpload = await fetch(`http://127.0.0.1:${port}/api/files`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "E".repeat(32) }, body: encryptedFile });
+  const spoofedDelete = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`, { method: "DELETE", headers: { "X-Cinder-Capability": viewerCapability } });
+  assert.equal(spoofedDelete.status, 403);
+  const secondUpload = await fetch(`http://127.0.0.1:${port}/api/files`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "E".repeat(32), "X-Cinder-Capability": httpCapability }, body: encryptedFile });
   assert.equal(secondUpload.status, 507);
 });

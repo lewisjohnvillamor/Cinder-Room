@@ -53,6 +53,7 @@ test("Rust relay matches the encrypted room, admission, moderation, and media pr
   assert.equal(page.headers.get("cache-control"), "no-store, max-age=0");
   assert.equal(page.headers.get("x-frame-options"), "DENY");
   assert.match(page.headers.get("permissions-policy"), /camera=\(self\)/);
+  assert.equal(page.headers.get("cross-origin-opener-policy"), "same-origin");
 
   const presenter = connect(health.roomId);
   const viewer = connect(health.roomId);
@@ -65,12 +66,16 @@ test("Rust relay matches the encrypted room, admission, moderation, and media pr
 
   const encryptedAlias = "Z".repeat(32);
   const presence = new Promise((resolve) => presenter.once("presence", resolve));
+  const presenterAdmitted = new Promise((resolve) => presenter.once("admission:admitted", resolve));
   presenter.emit("room:join", { encryptedAlias, ownerToken: health.ownerToken });
   await presence;
+  const { httpCapability } = await presenterAdmitted;
   const viewerAdmitted = new Promise((resolve) => viewer.once("admission:admitted", resolve));
   viewer.emit("room:join", { encryptedAlias: "V".repeat(32) });
-  await viewerAdmitted;
-  const mediaResponse = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Socket": presenter.id } });
+  const { httpCapability: viewerCapability } = await viewerAdmitted;
+  const impersonation = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": viewerCapability } });
+  assert.equal(impersonation.status, 403);
+  const mediaResponse = await fetch(`http://127.0.0.1:${port}/api/media-token?room=${health.roomId}`, { headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": httpCapability } });
   assert.equal(mediaResponse.status, 201);
   const media = await mediaResponse.json();
   assert.equal(media.serverUrl, "ws://localhost:7880");
@@ -134,23 +139,30 @@ test("Rust relay matches the encrypted room, admission, moderation, and media pr
 
   const fileAdded = new Promise((resolve) => viewer.once("file:added", resolve));
   const encryptedFile = new Uint8Array(64).fill(7);
+  const unauthorizedUpload = await fetch(`http://127.0.0.1:${port}/api/files`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "B".repeat(32) },
+    body: encryptedFile,
+  });
+  assert.equal(unauthorizedUpload.status, 403);
   const upload = await fetch(`http://127.0.0.1:${port}/api/files`, {
     method: "POST",
     headers: {
       "Content-Type": "application/octet-stream",
       "X-Cinder-Room": health.roomId,
       "X-Cinder-Meta": "B".repeat(32),
+      "X-Cinder-Capability": httpCapability,
     },
     body: encryptedFile,
   });
   assert.equal(upload.status, 201);
   const stored = await upload.json();
   assert.equal((await fileAdded).id, stored.id);
-  const download = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`);
+  const download = await fetch(`http://127.0.0.1:${port}/api/files/${stored.id}?room=${health.roomId}`, { headers: { "X-Cinder-Capability": httpCapability } });
   assert.deepEqual(new Uint8Array(await download.arrayBuffer()), encryptedFile);
   const secondUpload = await fetch(`http://127.0.0.1:${port}/api/files`, {
     method: "POST",
-    headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "E".repeat(32) },
+    headers: { "Content-Type": "application/octet-stream", "X-Cinder-Room": health.roomId, "X-Cinder-Meta": "E".repeat(32), "X-Cinder-Capability": httpCapability },
     body: encryptedFile,
   });
   assert.equal(secondUpload.status, 507);

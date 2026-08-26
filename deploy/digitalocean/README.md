@@ -35,6 +35,8 @@ Create two `A` records using the Droplet's public IPv4 address:
 
 Caddy requests trusted TLS certificates automatically after both records resolve to the Droplet.
 
+The deployment pins tested Caddy and LiveKit versions, sends HSTS and cross-origin isolation headers, and limits HTTP request bodies to `26MB` by default. If you raise `MAX_FILE_MB` above the deployment default of 25 MB, also set `CINDER_MAX_BODY_SIZE` slightly above it (for example, `101MB` for a 100 MB file ceiling).
+
 ## 3. Add a DigitalOcean Cloud Firewall
 
 Allow these inbound rules and leave outbound traffic allowed:
@@ -83,7 +85,7 @@ docker compose pull
 docker compose up -d --build
 ```
 
-For reproducible production operations, replace `latest`/major image tags with versions you have tested before updating.
+Image versions are pinned in `docker-compose.yml`. Review release notes and update those pins deliberately during a maintenance window.
 
 ## Important limits
 

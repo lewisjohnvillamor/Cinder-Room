@@ -109,6 +109,8 @@ This is privacy engineering, not a guarantee of total anonymity:
 
 Cinder uses the free, open-source LiveKit Community Edition as a self-hosted SFU. Browsers publish encrypted camera, microphone, screen, and screen-audio tracks to the SFU instead of forming a full peer-to-peer mesh. Cinder derives a separate media key from the invitation key using HKDF and configures LiveKit browser E2EE; the SFU routes encrypted media but still sees connection metadata and bandwidth.
 
+After admission, the relay gives each browser a short-lived connection capability for file and media HTTP requests. The capability is held only in memory, revoked on disconnect, rate-limited, and never included in invitations. LiveKit join tokens expire after five minutes.
+
 For local development, `npm run room` can start an installed `livekit-server` with one-session credentials generated in memory. Public group media needs a reachable `wss://` address, trusted TLS, and WebRTC/TURN ports. A Cloudflare Quick Tunnel carries the room app, chat, files, and encrypted fallback presentation, but it does not provide LiveKit's required public UDP media path.
 
 If LiveKit is unavailable, **Present** can use Cinder's encrypted MediaRecorder fallback through the existing Socket.IO route. It targets roughly 720p/12–15 FPS, carries no microphone, allows one presenter, and is bounded to five minutes/64 MB of replay ciphertext.

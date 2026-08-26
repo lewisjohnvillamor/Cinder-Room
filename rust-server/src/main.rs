@@ -47,6 +47,16 @@ struct StoredMessage {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StoredDirectMessage {
+    id: String,
+    from: String,
+    to: String,
+    encrypted: String,
+    created_at: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MeetingSignal {
     id: String,
     encrypted: String,
@@ -71,7 +81,7 @@ struct PendingItem {
 struct StoredFile {
     public: PublicFile,
     path: PathBuf,
-    uploader_socket_id: String,
+    uploader_capability_hash: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -135,9 +145,13 @@ struct AppState {
     ui_dir: PathBuf,
     file_dir: PathBuf,
     messages: RwLock<Vec<StoredMessage>>,
+    direct_messages: RwLock<Vec<StoredDirectMessage>>,
     meeting_signals: RwLock<Vec<MeetingSignal>>,
     files: RwLock<HashMap<String, StoredFile>>,
     aliases: RwLock<HashMap<String, String>>,
+    http_capabilities: RwLock<HashMap<String, String>>,
+    socket_capability_hashes: RwLock<HashMap<String, String>>,
+    http_rate_windows: Mutex<HashMap<String, RateWindow>>,
     pending_aliases: RwLock<HashMap<String, String>>,
     owner_sockets: RwLock<HashSet<String>>,
     sockets: RwLock<HashMap<String, SocketRef>>,
@@ -184,7 +198,7 @@ struct RoomQuery {
 }
 
 struct FileDeleteHeaders {
-    socket_id: String,
+    capability: String,
     owner_token: Option<String>,
 }
 
@@ -195,9 +209,9 @@ where
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let socket_id = parts
+        let capability = parts
             .headers
-            .get("x-cinder-socket")
+            .get("x-cinder-capability")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
@@ -207,7 +221,7 @@ where
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
         Ok(Self {
-            socket_id,
+            capability,
             owner_token,
         })
     }
@@ -228,6 +242,12 @@ struct AliasPayload {
 
 #[derive(Deserialize)]
 struct EncryptedPayload {
+    encrypted: String,
+}
+
+#[derive(Deserialize)]
+struct DirectMessagePayload {
+    target: String,
     encrypted: String,
 }
 
@@ -278,6 +298,8 @@ struct StopEvent {
 #[derive(Serialize)]
 struct AdmissionState {
     locked: bool,
+    #[serde(rename = "httpCapability")]
+    http_capability: String,
 }
 
 #[derive(Serialize)]
@@ -337,6 +359,32 @@ fn owner_matches(state: &AppState, candidate: &str) -> bool {
     bool::from(digest.ct_eq(&state.owner_hash))
 }
 
+fn capability_hash(candidate: &str) -> Option<String> {
+    if candidate.len() < 32 || candidate.len() > 128 || !candidate.is_ascii() {
+        return None;
+    }
+    Some(URL_SAFE_NO_PAD.encode(Sha256::digest(candidate.as_bytes())))
+}
+
+fn authenticated_socket(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let capability = headers.get("x-cinder-capability")?.to_str().ok()?;
+    let hash = capability_hash(capability)?;
+    state.http_capabilities.read().expect("capabilities lock").get(&hash).cloned()
+}
+
+fn capability_rate_allowed(state: &AppState, headers: &HeaderMap, maximum: u32, scope: &str) -> bool {
+    let Some(capability) = headers.get("x-cinder-capability").and_then(|value| value.to_str().ok()) else { return true; };
+    let Some(hash) = capability_hash(capability) else { return true; };
+    if !state.http_capabilities.read().expect("capabilities lock").contains_key(&hash) { return true; }
+    let rate_key = format!("{hash}:{scope}");
+    let now = now_ms();
+    let mut windows = state.http_rate_windows.lock().expect("http rate windows lock");
+    let window = windows.entry(rate_key).or_insert(RateWindow { started_at: now, count: 0 });
+    if now.saturating_sub(window.started_at) > 10_000 { window.started_at = now; window.count = 0; }
+    window.count += 1;
+    window.count <= maximum
+}
+
 fn create_media_token(state: &AppState, encrypted_alias: &str, identity: &str) -> Option<String> {
     let now = now_ms() / 1_000;
     let header = URL_SAFE_NO_PAD.encode(
@@ -351,7 +399,7 @@ fn create_media_token(state: &AppState, encrypted_alias: &str, identity: &str) -
             "iss": state.livekit_api_key.as_str(),
             "sub": identity,
             "nbf": now.saturating_sub(5),
-            "exp": now + 15 * 60,
+            "exp": now + 5 * 60,
             "metadata": encrypted_alias,
             "video": {
                 "room": state.room_id.as_str(),
@@ -426,6 +474,8 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    headers.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
     headers.insert(
         "permissions-policy",
         HeaderValue::from_static(
@@ -465,6 +515,9 @@ async fn media_token(
     Query(query): Query<RoomQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if !capability_rate_allowed(&state, &headers, 10, "media") {
+        return (StatusCode::TOO_MANY_REQUESTS, axum::Json(serde_json::json!({ "error": "Media authorization is moving too quickly." }))).into_response();
+    }
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (
             StatusCode::NOT_FOUND,
@@ -476,16 +529,15 @@ async fn media_token(
         .get("x-cinder-alias")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let socket_id = headers
-        .get("x-cinder-socket")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
+    let Some(socket_id) = authenticated_socket(&state, &headers) else {
+        return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "Join the encrypted room before starting media." }))).into_response();
+    };
     let joined = is_base64_url(encrypted_alias, 2_048)
         && state
             .aliases
             .read()
             .expect("aliases lock")
-            .get(socket_id)
+            .get(&socket_id)
             .is_some_and(|value| value == encrypted_alias);
     if !joined {
         return (
@@ -501,7 +553,7 @@ async fn media_token(
             "error": "Group video needs a public LiveKit/TURN endpoint. Cloudflare Quick Tunnel carries the room page, but not the required UDP media path."
         }))).into_response();
     };
-    let Some(participant_token) = create_media_token(&state, encrypted_alias, socket_id) else {
+    let Some(participant_token) = create_media_token(&state, encrypted_alias, &socket_id) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({ "error": "Media authorization failed." })),
@@ -518,9 +570,13 @@ async fn media_token(
         .into_response()
 }
 
-async fn file_list(State(state): State<Arc<AppState>>, Query(query): Query<RoomQuery>) -> Response {
+async fn file_list(State(state): State<Arc<AppState>>, Query(query): Query<RoomQuery>, headers: HeaderMap) -> Response {
+    if !capability_rate_allowed(&state, &headers, 120, "files") { return StatusCode::TOO_MANY_REQUESTS.into_response(); }
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
+    }
+    if authenticated_socket(&state, &headers).is_none() {
+        return (StatusCode::FORBIDDEN, "Join the encrypted room before opening files").into_response();
     }
     let mut files = state
         .files
@@ -538,6 +594,7 @@ async fn upload_file(
     request: axum::extract::Request,
 ) -> Response {
     let headers: &HeaderMap = request.headers();
+    if !capability_rate_allowed(&state, headers, 120, "files") { return StatusCode::TOO_MANY_REQUESTS.into_response(); }
     let room = headers
         .get("x-cinder-room")
         .and_then(|value| value.to_str().ok());
@@ -549,6 +606,9 @@ async fn upload_file(
     {
         return (StatusCode::BAD_REQUEST, "Invalid encrypted upload").into_response();
     }
+    let Some(_) = authenticated_socket(&state, headers) else {
+        return (StatusCode::FORBIDDEN, "Join the encrypted room before uploading files").into_response();
+    };
     let declared_size = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -581,11 +641,11 @@ async fn upload_file(
         committed: false,
     };
     let encrypted_meta = encrypted_meta.unwrap_or_default().to_owned();
-    let uploader_socket_id = headers
-        .get("x-cinder-socket")
+    let uploader_capability_hash = headers
+        .get("x-cinder-capability")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+        .and_then(capability_hash)
+        .unwrap_or_default();
     let Ok(body) = to_bytes(request.into_body(), state.max_file_bytes + 28).await else {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -643,7 +703,7 @@ async fn upload_file(
         StoredFile {
             public: public.clone(),
             path,
-            uploader_socket_id,
+            uploader_capability_hash,
         },
     );
     guard.committed = true;
@@ -655,9 +715,14 @@ async fn download_file(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RoomQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    if !capability_rate_allowed(&state, &headers, 120, "files") { return StatusCode::TOO_MANY_REQUESTS.into_response(); }
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    if authenticated_socket(&state, &headers).is_none() {
+        return StatusCode::FORBIDDEN.into_response();
     }
     let file = state.files.read().expect("files lock").get(&id).cloned();
     let Some(file) = file else {
@@ -690,10 +755,13 @@ async fn delete_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<RoomQuery>,
     FileDeleteHeaders {
-        socket_id,
+        capability,
         owner_token,
     }: FileDeleteHeaders,
 ) -> Response {
+    let mut rate_headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&capability) { rate_headers.insert("x-cinder-capability", value); }
+    if !capability_rate_allowed(&state, &rate_headers, 120, "files") { return StatusCode::TOO_MANY_REQUESTS.into_response(); }
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
     }
@@ -705,7 +773,12 @@ async fn delete_file(
     let is_owner = owner_token
         .as_deref()
         .is_some_and(|token| owner_matches(&state, token));
-    if file.uploader_socket_id != socket_id && !is_owner {
+    if !is_owner && authenticated_socket(&state, &rate_headers).is_none() {
+        state.files.write().expect("files lock").insert(id.clone(), file);
+        return (StatusCode::FORBIDDEN, "Join the encrypted room before deleting files").into_response();
+    }
+    let requester_capability_hash = capability_hash(&capability).unwrap_or_default();
+    if file.uploader_capability_hash != requester_capability_hash && !is_owner {
         state
             .files
             .write()
@@ -848,12 +921,20 @@ async fn admit_socket(
         .aliases
         .write()
         .expect("aliases lock")
-        .insert(socket_id, encrypted_alias);
+        .insert(socket_id.clone(), encrypted_alias);
+    if let Some(previous_hash) = state.socket_capability_hashes.write().expect("socket capability hashes lock").remove(&socket_id) {
+        state.http_capabilities.write().expect("capabilities lock").remove(&previous_hash);
+    }
+    let http_capability = random_token(32);
+    let hash = capability_hash(&http_capability).expect("generated capability is valid");
+    state.http_capabilities.write().expect("capabilities lock").insert(hash.clone(), socket_id.clone());
+    state.socket_capability_hashes.write().expect("socket capability hashes lock").insert(socket_id, hash);
     socket
         .emit(
             "admission:admitted",
             &AdmissionState {
                 locked: state.admission_locked.load(Ordering::SeqCst),
+                http_capability,
             },
         )
         .ok();
@@ -863,6 +944,8 @@ async fn admit_socket(
             &state.messages.read().expect("messages lock").clone(),
         )
         .ok();
+    let direct_messages = state.direct_messages.read().expect("direct messages lock").iter().filter(|item| item.from == socket.id.to_string() || item.to == socket.id.to_string()).cloned().collect::<Vec<_>>();
+    socket.emit("direct:messages:init", &direct_messages).ok();
     socket
         .emit(
             "meeting:signals:init",
@@ -925,6 +1008,15 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     .write()
                     .expect("sockets lock")
                     .insert(socket_id.clone(), socket.clone());
+                let join_state = state.clone();
+                let join_socket = socket.clone();
+                let join_socket_id = socket_id.clone();
+                tokio::spawn(async move {
+                    sleep(Duration::from_secs(15)).await;
+                    let admitted = join_state.aliases.read().expect("aliases lock").contains_key(&join_socket_id);
+                    let waiting = join_state.pending_aliases.read().expect("pending aliases lock").contains_key(&join_socket_id);
+                    if !admitted && !waiting { join_socket.disconnect().ok(); }
+                });
                 let message_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let meeting_rate = Arc::new(Mutex::new(RateWindow::default()));
                 let screen_rate = Arc::new(Mutex::new(RateWindow::default()));
@@ -1112,6 +1204,8 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     },
                 );
 
+                let group_message_rate = message_rate.clone();
+                let direct_message_rate = message_rate.clone();
                 let message_state = state.clone();
                 let message_io = io.clone();
                 socket.on(
@@ -1119,7 +1213,7 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                     move |socket: SocketRef, Data(payload): Data<EncryptedPayload>| {
                         let state = message_state.clone();
                         let io = message_io.clone();
-                        let rate = message_rate.clone();
+                        let rate = group_message_rate.clone();
                         async move {
                             if !is_admitted(&state, &socket.id.to_string()) {
                                 socket
@@ -1148,6 +1242,40 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                 }
                             }
                             io.emit("message:new", &message).await.ok();
+                        }
+                    },
+                );
+
+                let direct_state = state.clone();
+                socket.on(
+                    "direct:send",
+                    move |socket: SocketRef, Data(payload): Data<DirectMessagePayload>| {
+                        let state = direct_state.clone();
+                        let rate = direct_message_rate.clone();
+                        async move {
+                            let sender_id = socket.id.to_string();
+                            if !is_admitted(&state, &sender_id) {
+                                socket.emit("room:error", "Wait for the host to admit you.").ok();
+                                return;
+                            }
+                            if !rate_allowed(&rate, 30) {
+                                socket.emit("room:error", "Slow down for a moment.").ok();
+                                return;
+                            }
+                            if payload.target == sender_id || !is_admitted(&state, &payload.target) || !is_base64_url(&payload.encrypted, 24_000) {
+                                socket.emit("room:error", "Direct message unavailable.").ok();
+                                return;
+                            }
+                            let target = state.sockets.read().expect("sockets lock").get(&payload.target).cloned();
+                            let Some(target) = target else { return };
+                            let message = StoredDirectMessage { id: Uuid::new_v4().to_string(), from: sender_id, to: payload.target, encrypted: payload.encrypted, created_at: now_ms() };
+                            {
+                                let mut messages = state.direct_messages.write().expect("direct messages lock");
+                                messages.push(message.clone());
+                                if messages.len() > 500 { messages.remove(0); }
+                            }
+                            socket.emit("direct:new", &message).ok();
+                            target.emit("direct:new", &message).ok();
                         }
                     },
                 );
@@ -1452,6 +1580,12 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                             .write()
                             .expect("owner sockets lock")
                             .remove(&disconnected_id);
+                        if let Some(hash) = state.socket_capability_hashes.write().expect("socket capability hashes lock").remove(&disconnected_id) {
+                            state.http_capabilities.write().expect("capabilities lock").remove(&hash);
+                            let mut windows = state.http_rate_windows.lock().expect("http rate windows lock");
+                            windows.remove(&format!("{hash}:files"));
+                            windows.remove(&format!("{hash}:media"));
+                        }
                         state
                             .sockets
                             .write()
@@ -1640,9 +1774,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_dir: env::current_dir()?.join("self-host-dist"),
         file_dir,
         messages: RwLock::new(Vec::new()),
+        direct_messages: RwLock::new(Vec::new()),
         meeting_signals: RwLock::new(Vec::new()),
         files: RwLock::new(HashMap::new()),
         aliases: RwLock::new(HashMap::new()),
+        http_capabilities: RwLock::new(HashMap::new()),
+        socket_capability_hashes: RwLock::new(HashMap::new()),
+        http_rate_windows: Mutex::new(HashMap::new()),
         pending_aliases: RwLock::new(HashMap::new()),
         owner_sockets: RwLock::new(HashSet::new()),
         sockets: RwLock::new(HashMap::new()),

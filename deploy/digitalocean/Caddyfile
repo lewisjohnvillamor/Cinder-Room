@@ -1,8 +1,17 @@
 {$CINDER_DOMAIN} {
   encode zstd gzip
+  request_body {
+    max_size {$CINDER_MAX_BODY_SIZE:26MB}
+  }
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    Cross-Origin-Opener-Policy "same-origin"
+    Cross-Origin-Resource-Policy "same-origin"
+  }
   reverse_proxy 127.0.0.1:3000
 }
 
 {$MEDIA_DOMAIN} {
+  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
   reverse_proxy 127.0.0.1:7880
 }

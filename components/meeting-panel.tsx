@@ -20,6 +20,7 @@ import {
   Smiley,
   StopCircle,
   UserMinus,
+  VideoCamera,
   X,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,6 +33,7 @@ import {
   type Participant,
 } from "livekit-client";
 import type { MeetingSignal } from "./room-app";
+import { useAccessibleDialog } from "./use-accessible-dialog";
 
 type AttachableTrack = {
   kind: string;
@@ -138,10 +140,12 @@ export default function MeetingPanel({
   encryptedAlias,
   ownName,
   onMinimize,
+  onCallEnded,
   onFallbackPresent,
   onRequestPresent,
   onReleasePresent,
   socketId,
+  httpCapability,
   isHost,
   participants,
   meetingSignals,
@@ -161,10 +165,12 @@ export default function MeetingPanel({
   encryptedAlias: string;
   ownName: string;
   onMinimize: () => void;
+  onCallEnded: () => void;
   onFallbackPresent: () => void;
   onRequestPresent: () => Promise<{ ok: boolean; error?: string }>;
   onReleasePresent: () => void;
   socketId: string;
+  httpCapability: string;
   isHost: boolean;
   participants: Array<{ id: string; name: string }>;
   meetingSignals: MeetingSignal[];
@@ -199,6 +205,19 @@ export default function MeetingPanel({
   const [pollDraft, setPollDraft] = useState("");
   const [captionsOn, setCaptionsOn] = useState(false);
   const [captionsConfirmOpen, setCaptionsConfirmOpen] = useState(false);
+  const [previewEnabled, setPreviewEnabled] = useState(false);
+
+  const minimizeMeeting = useCallback(() => {
+    previewStreamRef.current?.getTracks().forEach((track) => track.stop());
+    previewStreamRef.current = null;
+    setPreviewEnabled(false);
+    onMinimize();
+  }, [onMinimize]);
+
+  const closeTopMeetingDialog = useCallback(() => {
+    if (captionsConfirmOpen) setCaptionsConfirmOpen(false);
+  }, [captionsConfirmOpen]);
+  useAccessibleDialog(captionsConfirmOpen, closeTopMeetingDialog, "captions");
 
   const refresh = useCallback(async (room: Room) => {
     const participants: Participant[] = [room.localParticipant, ...room.remoteParticipants.values()];
@@ -222,7 +241,7 @@ export default function MeetingPanel({
   }, [ownName, roomKey]);
 
   useEffect(() => {
-    if (!open || connected || !navigator.mediaDevices?.enumerateDevices) return;
+    if (!open || !previewEnabled || connected || !navigator.mediaDevices?.enumerateDevices) return;
     let cancelled = false;
     const prepare = async () => {
       try {
@@ -254,7 +273,7 @@ export default function MeetingPanel({
     };
     void prepare();
     return () => { cancelled = true; previewStreamRef.current?.getTracks().forEach((track) => track.stop()); previewStreamRef.current = null; };
-  }, [cameraDevice, connected, intent, microphoneDevice, open, speakerDevice]);
+  }, [cameraDevice, connected, intent, microphoneDevice, open, previewEnabled, speakerDevice]);
 
   useEffect(() => {
     if (moderationCommand?.command !== "mute") return;
@@ -274,7 +293,7 @@ export default function MeetingPanel({
     setError("");
     try {
       const response = await fetch(`/api/media-token?room=${encodeURIComponent(roomId)}`, {
-        headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Socket": socketId },
+        headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": httpCapability },
       });
       const payload = await response.json() as MediaCredentials & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Group media is not configured on this server.");
@@ -295,8 +314,15 @@ export default function MeetingPanel({
       room
         .on(RoomEvent.ParticipantConnected, update)
         .on(RoomEvent.ParticipantDisconnected, update)
+        .on(RoomEvent.TrackPublished, update)
         .on(RoomEvent.TrackSubscribed, update)
         .on(RoomEvent.TrackUnsubscribed, update)
+        .on(RoomEvent.TrackSubscriptionFailed, (_trackSid, participant, reason) => {
+          setError(`Could not receive ${participant.identity}'s media${reason ? `: ${String(reason)}` : "."}`);
+        })
+        .on(RoomEvent.EncryptionError, (_reason, participant) => {
+          setError(`Encrypted media from ${participant?.identity ?? "a participant"} could not be decoded.`);
+        })
         .on(RoomEvent.LocalTrackPublished, update)
         .on(RoomEvent.LocalTrackUnpublished, (publication) => {
           if (publication.source === Track.Source.ScreenShare) onReleasePresent();
@@ -336,6 +362,15 @@ export default function MeetingPanel({
       setConnecting(false);
     }
   }
+
+  useEffect(() => {
+    if (!open || connected || connecting) return;
+    const task = window.setTimeout(() => void connectMeeting(), 0);
+    // Opening is the explicit opt-in to join receive-only. Camera and microphone
+    // permissions are still requested only when their controls are enabled.
+    return () => window.clearTimeout(task);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function toggleCamera() {
     const room = roomRef.current;
@@ -390,7 +425,8 @@ export default function MeetingPanel({
     setCameraOn(false);
     setMicrophoneOn(false);
     setScreenOn(false);
-    onMinimize();
+    onCallEnded();
+    minimizeMeeting();
   }
 
   async function switchDevice(kind: MediaDeviceKind, deviceId: string) {
@@ -472,36 +508,36 @@ export default function MeetingPanel({
   const showSpotlight = layout === "spotlight" || (layout === "auto" && Boolean(spotlight));
 
   return (
-    <div className="meeting-backdrop" role="presentation">
-      <section className="meeting-card" role="dialog" aria-modal="true" aria-labelledby="meeting-title">
+    <section className="meeting-inline-shell" aria-label="Encrypted meeting workspace">
+      <div className="meeting-card" role="region" aria-labelledby="meeting-title">
         <header className="meeting-toolbar">
           <div>
             <p className="eyebrow"><span className={`status-dot ${connected ? "" : "offline"}`} /> Encrypted group media</p>
             <h2 id="meeting-title">{presenter ? `${presenter.name} is presenting` : intent === "audio" ? "Encrypted voice call" : "Camera, microphone & screen"}</h2>
           </div>
-          <button className="icon-button" aria-label="Minimize meeting" onClick={onMinimize}><X size={18} /></button>
+          <button className="icon-button" aria-label="End call and close media" onClick={() => void leaveMeeting()}><X size={18} /></button>
         </header>
 
         {!connected ? (
           <div className="meeting-prejoin">
-            {intent !== "audio" ? (
+            {previewEnabled && intent !== "audio" ? (
               <div className="prejoin-preview">
                 <video ref={previewRef} autoPlay playsInline muted />
                 <span><LockKey size={14} /> Preview stays on this device</span>
               </div>
-            ) : (
+            ) : previewEnabled ? (
               <div className="prejoin-preview audio-preview">
                 <Microphone size={34} weight="duotone" />
                 <span><LockKey size={14} /> Microphone stays encrypted on this device</span>
               </div>
-            )}
+            ) : <button className="prejoin-preview preview-permission" type="button" onClick={() => setPreviewEnabled(true)}><VideoCamera size={34} weight="duotone" /><strong>Start device preview</strong><span>Requests camera or microphone permission only when selected</span></button>}
             <h3>{intent === "present" ? "Join, then share your screen." : intent === "audio" ? "Join the encrypted voice call." : "Join the encrypted video room."}</h3>
             <p>{intent === "audio" ? "Your microphone turns on when you join. Camera stays off unless you enable it later." : "Cameras and microphones remain off until you enable them. Screen, camera, and microphone tracks can run at the same time."}</p>
-            <div className="device-grid">
+            {previewEnabled && <div className="device-grid">
               {intent !== "audio" && <label>Camera<select value={cameraDevice} onChange={(event) => void switchDevice("videoinput", event.target.value)}>{devices.filter((item) => item.kind === "videoinput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Camera ${index + 1}`}</option>)}</select></label>}
               <label>Microphone<select value={microphoneDevice} onChange={(event) => void switchDevice("audioinput", event.target.value)}>{devices.filter((item) => item.kind === "audioinput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Microphone ${index + 1}`}</option>)}</select></label>
               <label>Speaker<select value={speakerDevice} onChange={(event) => void switchDevice("audiooutput", event.target.value)}>{devices.filter((item) => item.kind === "audiooutput").map((item, index) => <option key={item.deviceId} value={item.deviceId}>{item.label || `Speaker ${index + 1}`}</option>)}</select></label>
-            </div>
+            </div>}
             {error && <div className="meeting-error" role="alert">{error}</div>}
             <button className="primary-button" disabled={connecting} onClick={connectMeeting}>
               <ShieldCheck size={18} weight="fill" /> {connecting ? "Connecting…" : intent === "audio" ? "Join encrypted call" : "Join encrypted media"}
@@ -541,23 +577,23 @@ export default function MeetingPanel({
             </div>
             {error && <div className="meeting-error compact" role="alert">{error}</div>}
             <footer className="meeting-controls" aria-label="Meeting controls">
-              <button className={`meeting-control ${microphoneOn ? "active" : ""}`} onClick={toggleMicrophone} aria-label={microphoneOn ? "Mute microphone" : "Turn on microphone"}>
+              <button className={`meeting-control ${microphoneOn ? "active" : ""}`} aria-pressed={microphoneOn} onClick={toggleMicrophone} aria-label={microphoneOn ? "Mute microphone" : "Turn on microphone"}>
                 {microphoneOn ? <Microphone size={20} weight="fill" /> : <MicrophoneSlash size={20} />}
                 <span>{microphoneOn ? "Mute" : "Mic"}</span>
               </button>
-              <button className={`meeting-control ${cameraOn ? "active" : ""}`} onClick={toggleCamera} aria-label={cameraOn ? "Turn off camera" : "Turn on camera"}>
+              <button className={`meeting-control ${cameraOn ? "active" : ""}`} aria-pressed={cameraOn} onClick={toggleCamera} aria-label={cameraOn ? "Turn off camera" : "Turn on camera"}>
                 {cameraOn ? <Camera size={20} weight="fill" /> : <CameraSlash size={20} />}
                 <span>{cameraOn ? "Stop video" : "Camera"}</span>
               </button>
-              <button className={`meeting-control ${screenOn ? "active" : ""}`} onClick={toggleScreen} aria-label={screenOn ? "Stop sharing screen" : "Share screen"}>
+              <button className={`meeting-control ${screenOn ? "active" : ""}`} aria-pressed={screenOn} onClick={toggleScreen} aria-label={screenOn ? "Stop sharing screen" : "Share screen"}>
                 {screenOn ? <StopCircle size={20} weight="fill" /> : <MonitorArrowUp size={20} />}
                 <span>{screenOn ? "Stop share" : "Present"}</span>
               </button>
-              <button className={`meeting-control ${raised.has(socketId) ? "active" : ""}`} onClick={() => void onMeetingSignal({ type: "hand", value: raised.has(socketId) ? "down" : "up" })} aria-label="Raise hand"><HandPalm size={20} /><span>Hand</span></button>
-              <button className="meeting-control" onClick={() => setDrawer(drawer === "activities" ? null : "activities")} aria-label="Reactions and activities"><Smiley size={20} /><span>Activities</span></button>
-              <button className={`meeting-control ${captionsOn ? "active" : ""}`} onClick={toggleCaptions} aria-label="Toggle live captions"><ClosedCaptioning size={20} /><span>Captions</span></button>
-              <button className="meeting-control" onClick={() => setDrawer(drawer === "people" ? null : "people")} aria-label="Participants"><SidebarSimple size={20} /><span>People</span></button>
-              <button className="meeting-control" onClick={() => setDrawer(drawer === "settings" ? null : "settings")} aria-label="Meeting settings"><Gear size={20} /><span>Settings</span></button>
+              <button className={`meeting-control ${raised.has(socketId) ? "active" : ""}`} aria-pressed={raised.has(socketId)} onClick={() => void onMeetingSignal({ type: "hand", value: raised.has(socketId) ? "down" : "up" })} aria-label={raised.has(socketId) ? "Lower hand" : "Raise hand"}><HandPalm size={20} /><span>Hand</span></button>
+              <button className="meeting-control" aria-expanded={drawer === "activities"} onClick={() => setDrawer(drawer === "activities" ? null : "activities")} aria-label="Reactions and activities"><Smiley size={20} /><span>Activities</span></button>
+              <button className={`meeting-control ${captionsOn ? "active" : ""}`} aria-pressed={captionsOn} onClick={toggleCaptions} aria-label="Toggle live captions"><ClosedCaptioning size={20} /><span>Captions</span></button>
+              <button className="meeting-control" aria-expanded={drawer === "people"} onClick={() => setDrawer(drawer === "people" ? null : "people")} aria-label="Participants"><SidebarSimple size={20} /><span>People</span></button>
+              <button className="meeting-control" aria-expanded={drawer === "settings"} onClick={() => setDrawer(drawer === "settings" ? null : "settings")} aria-label="Meeting settings"><Gear size={20} /><span>Settings</span></button>
               <button className="meeting-control leave" onClick={leaveMeeting} aria-label="Leave video meeting">
                 <PhoneDisconnect size={20} weight="fill" /><span>Leave call</span>
               </button>
@@ -568,10 +604,10 @@ export default function MeetingPanel({
                 {drawer === "people" && <div className="meeting-drawer-body">
                   {isHost && <button className={`soft-button ${admissionLocked ? "live-button" : ""}`} onClick={() => onAdmissionLock(!admissionLocked)}><LockKey size={16} /> {admissionLocked ? "Unlock room" : "Lock new joins"}</button>}
                   {pendingPeople.map((person) => <div className="participant-row" key={person.id}><span>{person.name} · waiting</span><div><button onClick={() => onAdmissionDecision(person.id, true)}>Admit</button><button onClick={() => onAdmissionDecision(person.id, false)}>Deny</button></div></div>)}
-                  {participants.map((person) => <div className="participant-row" key={person.id}><span>{person.name}{person.id === socketId ? " · you" : ""}</span>{isHost && person.id !== socketId && <div><button title="Mute" onClick={() => onModerate(person.id, "mute")}><MicrophoneSlash size={15} /></button><button title="Remove" onClick={() => onModerate(person.id, "remove")}><UserMinus size={15} /></button></div>}</div>)}
+                  {participants.map((person) => <div className="participant-row" key={person.id}><span>{person.name}{person.id === socketId ? " · you" : ""}</span>{isHost && person.id !== socketId && <div><button aria-label={`Mute ${person.name}`} onClick={() => onModerate(person.id, "mute")}><MicrophoneSlash size={15} /></button><button aria-label={`Remove ${person.name}`} onClick={() => onModerate(person.id, "remove")}><UserMinus size={15} /></button></div>}</div>)}
                 </div>}
                 {drawer === "activities" && <div className="meeting-drawer-body activities-panel">
-                  <div className="reaction-row">{["👍", "❤️", "😂", "🎉", "👏", "🤔"].map((emoji) => <button key={emoji} onClick={() => void onMeetingSignal({ type: "reaction", value: emoji })}>{emoji}</button>)}</div>
+                  <div className="reaction-row">{[["👍", "thumbs up"], ["❤️", "heart"], ["😂", "laughter"], ["🎉", "celebration"], ["👏", "applause"], ["🤔", "thinking"]].map(([emoji, label]) => <button key={emoji} aria-label={`React with ${label}`} onClick={() => void onMeetingSignal({ type: "reaction", value: emoji })}>{emoji}</button>)}</div>
                   <label><Question size={16} /> Q&amp;A<input value={questionDraft} onChange={(event) => setQuestionDraft(event.target.value)} placeholder="Ask an encrypted question" /><button disabled={!questionDraft.trim()} onClick={() => { void onMeetingSignal({ type: "question", value: questionDraft.trim().slice(0, 240) }); setQuestionDraft(""); }}>Ask</button></label>
                   {questions.map((question) => <div className="activity-card" key={question.id}><strong>{question.sender}{answeredQuestions.has(question.id) ? " · answered" : ""}</strong><span>{question.value}</span>{isHost && !answeredQuestions.has(question.id) && <button onClick={() => void onMeetingSignal({ type: "question-answer", value: "answered", extra: [question.id] })}>Mark answered</button>}</div>)}
                   {isHost && <label><ChartBar size={16} /> Quick poll<input value={pollDraft} onChange={(event) => setPollDraft(event.target.value)} placeholder="Yes / No question" /><button disabled={!pollDraft.trim()} onClick={() => { void onMeetingSignal({ type: "poll", value: pollDraft.trim().slice(0, 180), extra: ["Yes", "No"] }); setPollDraft(""); }}>Launch</button></label>}
@@ -590,11 +626,11 @@ export default function MeetingPanel({
             )}
           </>
         )}
-      </section>
+      </div>
 
       {captionsConfirmOpen && (
         <div className="modal-backdrop confirm-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCaptionsConfirmOpen(false)}>
-          <section className="modal-card confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="captions-confirm-title" aria-describedby="captions-confirm-message">
+          <section className="modal-card confirm-card" tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="captions-confirm-title" aria-describedby="captions-confirm-message">
             <p className="eyebrow">Live captions</p>
             <h2 id="captions-confirm-title">Enable captions?</h2>
             <p id="captions-confirm-message">Browser captions may send microphone audio to your browser vendor&apos;s speech service. Caption text is encrypted by Cinder, but recognition may not be local.</p>
@@ -605,6 +641,6 @@ export default function MeetingPanel({
           </section>
         </div>
       )}
-    </div>
+    </section>
   );
 }

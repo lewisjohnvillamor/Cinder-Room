@@ -14,6 +14,9 @@ const REQUIRED_EVENTS = [
   "messages:init",
   "message:send",
   "message:new",
+  "direct:messages:init",
+  "direct:send",
+  "direct:new",
   "meeting:signals:init",
   "meeting:signal",
   "presence",
@@ -38,7 +41,7 @@ test("Node and Rust relays expose the same bounded room protocol", async () => {
     assert.ok(rustRelay.includes(`"${event}"`), `Rust relay is missing ${event}`);
   }
 
-  for (const header of ["x-cinder-alias", "x-cinder-socket"]) {
+  for (const header of ["x-cinder-alias", "x-cinder-capability"]) {
     assert.ok(nodeRelay.toLowerCase().includes(header));
     assert.ok(rustRelay.toLowerCase().includes(header));
   }

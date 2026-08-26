@@ -10,15 +10,10 @@ try {
 }
 
 const routeMode = process.env.CINDER_ROUTES ?? "both";
-const restartDelayMs = Math.max(3, Number.parseInt(process.env.CINDER_RESTART_DELAY_SEC ?? "10", 10)) * 1000;
 
 const children = new Set();
 let stopping = false;
 let mediaProcess = null;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function start(command, args, options = {}) {
   const child = spawn(command, args, { stdio: "inherit", ...options });
@@ -100,9 +95,5 @@ mediaProcess?.once("exit", (code) => {
   if (!stopping && code) console.log("The media server stopped; chat and files remain available.");
 });
 
-while (!stopping) {
-  await startRelay(relayEnvironment);
-  if (stopping) break;
-  console.log(`\nCinder will restart in ${restartDelayMs / 1000} seconds with a fresh room and tunnel...\n`);
-  await sleep(restartDelayMs);
-}
+const relayExitCode = await startRelay(relayEnvironment);
+if (!stopping) stop(relayExitCode);

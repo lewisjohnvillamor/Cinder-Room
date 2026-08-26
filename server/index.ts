@@ -8,9 +8,10 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { Server, type Socket } from "socket.io";
 
 type StoredMessage = { id: string; encrypted: string; createdAt: number };
+type StoredDirectMessage = { id: string; from: string; to: string; encrypted: string; createdAt: number };
 type MeetingSignal = { id: string; encrypted: string; createdAt: number };
-type StoredFile = { id: string; encryptedMeta: string; encryptedSize: number; createdAt: number; path: string; uploaderSocketId: string };
-type PublicFile = Omit<StoredFile, "path">;
+type StoredFile = { id: string; encryptedMeta: string; encryptedSize: number; createdAt: number; path: string; uploaderCapabilityHash: string };
+type PublicFile = Omit<StoredFile, "path" | "uploaderCapabilityHash">;
 type PublicRoute = { type: "local" | "onion" | "cloudflare"; baseUrl: string };
 type ScreenStart = { id: string; encrypted: string; createdAt: number };
 type ScreenChunk = { streamId: string; sequence: number; encrypted: string };
@@ -47,9 +48,13 @@ const FILE_DIR = join(RUN_DIR, "ciphertext");
 mkdirSync(FILE_DIR, { recursive: true, mode: 0o700 });
 
 const messages: StoredMessage[] = [];
+const directMessages: StoredDirectMessage[] = [];
 const meetingSignals: MeetingSignal[] = [];
 const files = new Map<string, StoredFile>();
 const aliases = new Map<string, string>();
+const httpCapabilities = new Map<string, string>();
+const socketCapabilityHashes = new Map<string, string>();
+const httpRateWindows = new Map<string, { startedAt: number; count: number }>();
 const pendingAliases = new Map<string, string>();
 const ownerSockets = new Set<string>();
 const routes: PublicRoute[] = [{ type: "local", baseUrl: `http://localhost:${PORT}` }];
@@ -75,6 +80,30 @@ function ownerMatches(candidate: unknown) {
   return hash.length === ownerHash.length && timingSafeEqual(hash, ownerHash);
 }
 
+function capabilityHash(candidate: unknown) {
+  if (typeof candidate !== "string" || candidate.length < 32 || candidate.length > 128) return "";
+  return createHash("sha256").update(candidate).digest("hex");
+}
+
+function authenticatedSocket(request: Request) {
+  const hash = capabilityHash(request.header("X-Cinder-Capability"));
+  return hash ? httpCapabilities.get(hash) ?? "" : "";
+}
+
+function capabilityRateAllowed(request: Request, maximum: number, scope: "files" | "media") {
+  const hash = capabilityHash(request.header("X-Cinder-Capability"));
+  if (!hash || !httpCapabilities.has(hash)) return true;
+  const rateKey = `${hash}:${scope}`;
+  const now = Date.now();
+  const current = httpRateWindows.get(rateKey);
+  if (!current || now - current.startedAt > 10_000) {
+    httpRateWindows.set(rateKey, { startedAt: now, count: 1 });
+    return true;
+  }
+  current.count += 1;
+  return current.count <= maximum;
+}
+
 function createMediaToken(encryptedAlias: string, identity: string) {
   const now = Math.floor(Date.now() / 1000);
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -83,7 +112,7 @@ function createMediaToken(encryptedAlias: string, identity: string) {
     iss: LIVEKIT_API_KEY,
     sub: identity,
     nbf: now - 5,
-    exp: now + 15 * 60,
+    exp: now + 5 * 60,
     metadata: encryptedAlias,
     video: { room: roomId, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false },
   });
@@ -129,6 +158,8 @@ app.use((_request, response, next) => {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
+  response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   response.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()");
   response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
   next();
@@ -160,10 +191,11 @@ app.get("/api/health", (_request, response) => response.json({
 }));
 app.get("/api/routes", (_request, response) => response.json(routes));
 app.get("/api/media-token", (request, response) => {
+  if (!capabilityRateAllowed(request, 10, "media")) return response.status(429).json({ error: "Media authorization is moving too quickly." });
   if (request.query.room !== roomId) return response.status(404).json({ error: "Room unavailable" });
   const encryptedAlias = request.header("X-Cinder-Alias") ?? "";
-  const socketId = request.header("X-Cinder-Socket") ?? "";
-  if (!isBase64Url(encryptedAlias, 2048) || aliases.get(socketId) !== encryptedAlias) {
+  const socketId = authenticatedSocket(request);
+  if (!socketId || !isBase64Url(encryptedAlias, 2048) || aliases.get(socketId) !== encryptedAlias) {
     return response.status(403).json({ error: "Join the encrypted room before starting media." });
   }
   const serverUrl = mediaUrlForRequest(request);
@@ -173,12 +205,16 @@ app.get("/api/media-token", (request, response) => {
   return response.status(201).json({ serverUrl, participantToken: createMediaToken(encryptedAlias, socketId) });
 });
 app.get("/api/files", (request, response) => {
+  if (!capabilityRateAllowed(request, 120, "files")) return response.status(429).json({ error: "File activity is moving too quickly." });
   if (request.query.room !== roomId) return response.status(404).json({ error: "Room unavailable" });
+  if (!authenticatedSocket(request)) return response.status(403).json({ error: "Join the encrypted room before opening files." });
   return response.json(Array.from(files.values()).map(publicFile).sort((a, b) => b.createdAt - a.createdAt));
 });
 
 app.post("/api/files", (request, response, next) => {
+  if (!capabilityRateAllowed(request, 120, "files")) return response.status(429).json({ error: "File activity is moving too quickly." });
   if (request.header("X-Cinder-Room") !== roomId) return response.status(400).json({ error: "Invalid encrypted upload" });
+  if (!authenticatedSocket(request)) return response.status(403).json({ error: "Join the encrypted room before uploading files." });
   if (activeUploads >= MAX_CONCURRENT_UPLOADS) return response.status(429).json({ error: "All encrypted upload lanes are busy. Try again shortly." });
   if (files.size >= MAX_FILES) return response.status(507).json({ error: "This room reached its temporary file limit." });
   const declaredSize = Number.parseInt(request.header("Content-Length") ?? "0", 10);
@@ -193,14 +229,14 @@ app.post("/api/files", (request, response, next) => {
 }, express.raw({ type: "application/octet-stream", limit: `${MAX_FILE_MB + 1}mb` }), (request, response) => {
   const room = request.header("X-Cinder-Room");
   const encryptedMeta = request.header("X-Cinder-Meta");
-  const uploaderSocketId = request.header("X-Cinder-Socket") ?? "";
+  const uploaderCapabilityHash = capabilityHash(request.header("X-Cinder-Capability"));
   if (room !== roomId || !isBase64Url(encryptedMeta, 16_384) || !Buffer.isBuffer(request.body)) return response.status(400).json({ error: "Invalid encrypted upload" });
   if (request.body.byteLength < 29 || request.body.byteLength > MAX_FILE_MB * 1024 * 1024 + 28) return response.status(413).json({ error: "Encrypted file exceeds this room's limit" });
   if (files.size >= MAX_FILES || storedCiphertextBytes + request.body.byteLength > MAX_ROOM_STORAGE_MB * 1024 * 1024) return response.status(507).json({ error: "This room reached its temporary storage limit." });
   const id = randomUUID();
   const filePath = join(FILE_DIR, `${id}.bin`);
   writeFileSync(filePath, request.body, { mode: 0o600, flag: "wx" });
-  const item: StoredFile = { id, encryptedMeta: encryptedMeta as string, encryptedSize: request.body.byteLength, createdAt: Date.now(), path: filePath, uploaderSocketId };
+  const item: StoredFile = { id, encryptedMeta: encryptedMeta as string, encryptedSize: request.body.byteLength, createdAt: Date.now(), path: filePath, uploaderCapabilityHash };
   files.set(id, item);
   storedCiphertextBytes += item.encryptedSize;
   io.emit("file:added", publicFile(item));
@@ -208,7 +244,9 @@ app.post("/api/files", (request, response, next) => {
 });
 
 app.get("/api/files/:id", (request, response) => {
+  if (!capabilityRateAllowed(request, 120, "files")) return response.status(429).end();
   if (request.query.room !== roomId) return response.status(404).end();
+  if (!authenticatedSocket(request)) return response.status(403).end();
   const item = files.get(request.params.id);
   if (!item || !existsSync(item.path)) return response.status(404).end();
   response.setHeader("Content-Type", "application/octet-stream");
@@ -217,12 +255,14 @@ app.get("/api/files/:id", (request, response) => {
 });
 
 app.delete("/api/files/:id", (request, response) => {
+  if (!capabilityRateAllowed(request, 120, "files")) return response.status(429).json({ error: "File activity is moving too quickly." });
   if (request.query.room !== roomId) return response.status(404).json({ error: "Room unavailable" });
   const item = files.get(request.params.id);
   if (!item) return response.status(404).json({ error: "File unavailable" });
-  const socketId = request.header("X-Cinder-Socket") ?? "";
+  const requesterCapabilityHash = capabilityHash(request.header("X-Cinder-Capability"));
   const isOwner = ownerMatches(request.header("X-Cinder-Owner-Token"));
-  if (item.uploaderSocketId !== socketId && !isOwner) return response.status(403).json({ error: "Only the sender or host can delete this file." });
+  if (!isOwner && !authenticatedSocket(request)) return response.status(403).json({ error: "Join the encrypted room before deleting files." });
+  if (item.uploaderCapabilityHash !== requesterCapabilityHash && !isOwner) return response.status(403).json({ error: "Only the sender or host can delete this file." });
   if (existsSync(item.path)) rmSync(item.path);
   storedCiphertextBytes = Math.max(0, storedCiphertextBytes - item.encryptedSize);
   files.delete(request.params.id);
@@ -246,6 +286,9 @@ app.use((error: unknown, _request: Request, response: Response, next: NextFuncti
 });
 
 const server = createServer(app);
+server.headersTimeout = 10_000;
+server.requestTimeout = 5 * 60_000;
+server.keepAliveTimeout = 5_000;
 const io = new Server(server, { maxHttpBufferSize: 2 * 1024 * 1024, serveClient: false, transports: ["websocket", "polling"], cors: { origin: false } });
 io.use((socket, next) => {
   if (socket.handshake.auth.room !== roomId) return next(new Error("Room unavailable"));
@@ -268,8 +311,15 @@ function emitPending() {
 function admit(socket: Socket, encryptedAlias: string) {
   pendingAliases.delete(socket.id);
   aliases.set(socket.id, encryptedAlias);
-  socket.emit("admission:admitted", { locked: admissionLocked });
+  const previousHash = socketCapabilityHashes.get(socket.id);
+  if (previousHash) httpCapabilities.delete(previousHash);
+  const httpCapability = randomBytes(32).toString("base64url");
+  const hash = capabilityHash(httpCapability);
+  httpCapabilities.set(hash, socket.id);
+  socketCapabilityHashes.set(socket.id, hash);
+  socket.emit("admission:admitted", { locked: admissionLocked, httpCapability });
   socket.emit("messages:init", messages);
+  socket.emit("direct:messages:init", directMessages.filter((item) => item.from === socket.id || item.to === socket.id));
   socket.emit("meeting:signals:init", meetingSignals);
   if (activeScreen) socket.emit("screen:state", { start: activeScreen.start, chunks: activeScreen.chunks });
   io.emit("presence", Array.from(aliases.entries()).map(([id, aliasValue]) => ({ id, encryptedAlias: aliasValue })));
@@ -277,6 +327,8 @@ function admit(socket: Socket, encryptedAlias: string) {
 }
 
 io.on("connection", (socket) => {
+  const joinTimeout = setTimeout(() => { if (!aliases.has(socket.id) && !pendingAliases.has(socket.id)) socket.disconnect(true); }, 15_000);
+  joinTimeout.unref();
   let sentInWindow = 0;
   let windowStarted = Date.now();
   let meetingInWindow = 0;
@@ -284,6 +336,7 @@ io.on("connection", (socket) => {
   let screenChunksInWindow = 0;
   let screenWindowStarted = Date.now();
   socket.on("room:join", (payload: { encryptedAlias?: unknown; ownerToken?: unknown }) => {
+    clearTimeout(joinTimeout);
     if (!isBase64Url(payload?.encryptedAlias, 2048)) return socket.emit("room:error", "Invalid encrypted alias.");
     const isOwner = ownerMatches(payload?.ownerToken);
     if (isOwner) ownerSockets.add(socket.id);
@@ -332,6 +385,19 @@ io.on("connection", (socket) => {
     io.emit("message:new", item);
   });
 
+  socket.on("direct:send", (payload: { target?: unknown; encrypted?: unknown }) => {
+    if (!aliases.has(socket.id)) return socket.emit("room:error", "Wait for the host to admit you.");
+    const now = Date.now();
+    if (now - windowStarted > 10_000) { windowStarted = now; sentInWindow = 0; }
+    sentInWindow += 1;
+    if (sentInWindow > 30) return socket.emit("room:error", "Slow down for a moment.");
+    if (typeof payload?.target !== "string" || !aliases.has(payload.target) || payload.target === socket.id || !isBase64Url(payload?.encrypted, 24_000)) return socket.emit("room:error", "Direct message unavailable.");
+    const item: StoredDirectMessage = { id: randomUUID(), from: socket.id, to: payload.target, encrypted: payload.encrypted as string, createdAt: now };
+    directMessages.push(item);
+    if (directMessages.length > 500) directMessages.shift();
+    io.to(socket.id).to(payload.target).emit("direct:new", item);
+  });
+
   socket.on("meeting:signal", (payload: { encrypted?: unknown }) => {
     if (!aliases.has(socket.id)) return;
     const now = Date.now();
@@ -347,10 +413,7 @@ io.on("connection", (socket) => {
 
   socket.on("room:destroy", (payload: { ownerToken?: unknown }) => {
     if (!ownerMatches(payload?.ownerToken)) return socket.emit("room:error", "Only the host can destroy this room.");
-    socket.emit("room:restarting", { countdownSeconds: 10 });
-    for (const peer of io.sockets.sockets.values()) {
-      if (peer.id !== socket.id) peer.emit("room:destroyed");
-    }
+    io.emit("room:destroyed");
     setTimeout(() => shutdown("Host destroyed the room."), 350).unref();
   });
 
@@ -404,6 +467,10 @@ io.on("connection", (socket) => {
     aliases.delete(socket.id);
     pendingAliases.delete(socket.id);
     ownerSockets.delete(socket.id);
+    const hash = socketCapabilityHashes.get(socket.id);
+    if (hash) httpCapabilities.delete(hash);
+    if (hash) { httpRateWindows.delete(`${hash}:files`); httpRateWindows.delete(`${hash}:media`); }
+    socketCapabilityHashes.delete(socket.id);
     io.emit("presence", Array.from(aliases.entries()).map(([id, aliasValue]) => ({ id, encryptedAlias: aliasValue })));
     emitPending();
   });
