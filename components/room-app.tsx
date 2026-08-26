@@ -323,6 +323,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
   const [activePresentation, setActivePresentation] = useState<ActivePresentation | null>(null);
   const [screenOpen, setScreenOpen] = useState(false);
   const [meetingOpen, setMeetingOpen] = useState(false);
+  const [demoCallSnapshot, setDemoCallSnapshot] = useState(false);
   const [mobileCallView, setMobileCallView] = useState<"video" | "chat">("video");
   const [meetingIntent, setMeetingIntent] = useState<"video" | "audio" | "present">("video");
   const [recordingVoice, setRecordingVoice] = useState(false);
@@ -714,6 +715,16 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
   }, []);
 
+  useEffect(() => {
+    if (!demo) return;
+    const snapshot = new URLSearchParams(window.location.search).get("snapshot");
+    const task = window.setTimeout(() => {
+      if (snapshot === "light") setTheme("light");
+      if (snapshot === "call") { setDemoCallSnapshot(true); setMeetingOpen(true); }
+    }, 0);
+    return () => window.clearTimeout(task);
+  }, [demo]);
+
   useEffect(() => () => {
     if (preview) URL.revokeObjectURL(preview.url);
   }, [preview]);
@@ -950,6 +961,11 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
       onAdmissionDecision={decideAdmission}
       onModerate={moderateParticipant}
     />;
+  }
+
+  function demoCallPanel() {
+    if (!demoCallSnapshot) return null;
+    return <section className="meeting-inline-shell" aria-label="Demo encrypted meeting workspace"><div className="meeting-card"><header className="meeting-toolbar"><div><p className="eyebrow"><span className="status-dot" /> Encrypted group media</p><h2>Lewis is broadcasting</h2></div><button className="icon-button" aria-label="End demo call"><X size={18} /></button></header><div className="meeting-stage"><div className="meeting-grid"><article className="meeting-tile speaking"><div className="meeting-camera-off"><VideoCamera size={28} /><span>Lewis · camera preview</span></div><div className="meeting-tile-label"><span>Lewis · you</span><span className="quality-dot quality-excellent" /></div></article><article className="meeting-tile"><div className="meeting-camera-off"><VideoCamera size={28} /><span>Mika · camera off</span></div><div className="meeting-tile-label"><span>Mika</span><span className="quality-dot quality-good" /></div></article></div></div><footer className="meeting-controls"><button className="meeting-control"><Microphone size={20} /><span>Mic</span></button><button className="meeting-control active"><VideoCamera size={20} /><span>Stop video</span></button><button className="meeting-control"><MonitorArrowUp size={20} /><span>Present</span></button><button className="meeting-control"><UsersThree size={20} /><span>People</span></button><button className="meeting-control leave"><Phone size={20} /><span>Leave call</span></button></footer></div></section>;
   }
 
   function fallbackPresentationPanel() {
@@ -1330,6 +1346,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
 
         <div className={`room-center ${meetingOpen || (screenOpen && activePresentation) ? `media-open mobile-show-${mobileCallView}` : ""}`}>
           {(meetingOpen || (screenOpen && activePresentation)) && <nav className="mobile-call-switcher" aria-label="Call view"><button className={mobileCallView === "video" ? "active" : ""} onClick={() => setMobileCallView("video")}>Video</button><button className={mobileCallView === "chat" ? "active" : ""} onClick={() => setMobileCallView("chat")}>Chat{totalDirectUnread ? <span className="unread-badge">{totalDirectUnread}</span> : null}</button></nav>}
+          {demoCallPanel()}
           {fallbackPresentationPanel()}
           {meetingPanel()}
         <section className="chat-panel" aria-label="Room chat">

@@ -5,19 +5,22 @@
 [![Rust 1.94](https://img.shields.io/badge/Rust-1.94-dea584?logo=rust)](rust-toolchain.toml)
 [![Node 22](https://img.shields.io/badge/Node-22-5fa04e?logo=nodedotjs)](package.json)
 
-Run one temporary, self-hosted room and share its capability link. Cinder Room provides end-to-end encrypted chat, files, group video, screen sharing, waiting-room controls, and meeting activities. The Rust relay is the default; a protocol-compatible Node relay remains available for development and fallback.
+Run one temporary, self-hosted room and share its capability link. Cinder Room provides end-to-end encrypted group and direct chat, files, group video, screen sharing, waiting-room controls, and meeting activities. The Rust relay is the default; a protocol-compatible Node relay remains available for development and fallback.
 
 ![Cinder Room desktop interface](docs/screenshots/room-desktop.jpg)
 
-![Cinder Room demonstration](docs/cinder-room-demo.gif)
+![Cinder Room light theme](docs/screenshots/room-light.jpg)
+
+![Cinder Room active call workspace](docs/screenshots/room-call.jpg)
 
 ## What it includes
 
-- End-to-end encrypted messages, aliases, file contents and metadata, screen-relay segments, and meeting activities
+- End-to-end encrypted group messages, relay-targeted direct messages, aliases, file contents and metadata, screen-relay segments, and meeting activities
 - Group camera and microphone, camera plus screen, active-speaker/grid/spotlight layouts, pinning, picture-in-picture, and adaptive quality through a self-hosted LiveKit SFU
-- Host waiting room, lock/admit/deny, mute, remove, and destroy-room controls
+- Persistent broadcast indicator with Join/Rejoin, plus full-width desktop media and focused Video/Chat views on mobile
+- Host waiting room with in-room admit/deny prompts, lock, mute, remove, and destroy-room controls
 - Raise hand, reactions, Q&A, quick polls, and opt-in browser captions
-- Responsive desktop and mobile layouts with explicit meeting and room Leave actions
+- Responsive participant and conversation tabs, unread direct-message badges, and left-drawer file storage
 - Independent Tor Onion Service and normal-browser routes
 - Memory-only room state and temporary ciphertext files removed when the process exits normally
 - No accounts, analytics, database, paid API, recording, or hosted Cinder service
@@ -41,7 +44,9 @@ The terminal prints the private host URL. Open it, choose an alias, then use **I
 CINDER_RELAY=node npm run room
 ```
 
-Press `Ctrl+C` to destroy the server-side room. **Leave** disconnects only the current participant; **Destroy room** ends it for everyone. A hard power loss or `SIGKILL` can bypass orderly cleanup, so inspect the operating system's temporary directory in that case.
+Press `Ctrl+C` to destroy the server-side room. **Leave** disconnects only the current participant; **Destroy room** ends it for everyone and does not automatically open a replacement room or tunnel. Start `npm run room` again when a new room is wanted. A hard power loss or `SIGKILL` can bypass orderly cleanup, so inspect the operating system's temporary directory in that case.
+
+Always share a URL produced by **Invite**. The complete guest URL contains `#k=`; opening a private host/bootstrap URL on another device can create a different encryption key, preventing the devices from decrypting one another. Cinder now reports that mismatch instead of silently hiding those participants.
 
 ### Docker
 
@@ -65,6 +70,7 @@ Append the host URL's `/room/<room-id>#o=<owner-token>` suffix to the generated 
 | Protocol area | Rust | Node fallback |
 | --- | :---: | :---: |
 | Encrypted chat history and presence | Yes | Yes |
+| Relay-targeted direct chat and unread delivery | Yes | Yes |
 | Encrypted file relay and limits | Yes | Yes |
 | Waiting room, lock, admit, and deny | Yes | Yes |
 | Host mute, remove, and destroy | Yes | Yes |
@@ -108,6 +114,8 @@ This is privacy engineering, not a guarantee of total anonymity:
 ## Group video and screen sharing
 
 Cinder uses the free, open-source LiveKit Community Edition as a self-hosted SFU. Browsers publish encrypted camera, microphone, screen, and screen-audio tracks to the SFU instead of forming a full peer-to-peer mesh. Cinder derives a separate media key from the invitation key using HKDF and configures LiveKit browser E2EE; the SFU routes encrypted media but still sees connection metadata and bandwidth.
+
+Starting a call publishes an encrypted call-status event. Other room members see a pulsing broadcast indicator and can join or rejoin while a broadcaster remains active. Joining begins receive-only: camera and microphone permissions are requested only when their controls are enabled. Closing the media workspace uses the same teardown as **Leave call**, disconnecting media and releasing local tracks. On phones, **Video** and **Chat** are focused full-height views rather than a cramped split screen; switching views does not leave the call.
 
 After admission, the relay gives each browser a short-lived connection capability for file and media HTTP requests. The capability is held only in memory, revoked on disconnect, rate-limited, and never included in invitations. LiveKit join tokens expire after five minutes.
 
