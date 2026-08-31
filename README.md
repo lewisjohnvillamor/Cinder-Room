@@ -193,6 +193,7 @@ Copy `.env.example` to `.env` or export variables before starting:
 | `MAX_FILES` | `200` | Temporary file count |
 | `MAX_ROOM_STORAGE_MB` | `1024` | Total ciphertext storage |
 | `SCREEN_MAX_MINUTES` | `5` | Fallback presentation duration |
+| `ADMISSION_WAIT_SECONDS` | `120` | How long an undecided guest may hold a slot in the waiting room |
 | `LIVEKIT_URL` | empty | Public `wss://` media endpoint |
 | `LIVEKIT_API_KEY` | generated/empty | LiveKit token issuer key |
 | `LIVEKIT_API_SECRET` | generated/empty | LiveKit signing secret |
