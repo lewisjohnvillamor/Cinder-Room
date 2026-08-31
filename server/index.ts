@@ -35,6 +35,7 @@ const MAX_FILES = Math.min(Math.max(Number.parseInt(process.env.MAX_FILES ?? "20
 const MAX_ROOM_STORAGE_MB = Math.min(Math.max(Number.parseInt(process.env.MAX_ROOM_STORAGE_MB ?? "1024", 10), MAX_FILE_MB), 102_400);
 const ROOM_TTL_MINUTES = Math.min(Math.max(Number.parseInt(process.env.ROOM_TTL_MINUTES ?? "180", 10), 5), 10_080);
 const SCREEN_MAX_MINUTES = Math.min(Math.max(Number.parseInt(process.env.SCREEN_MAX_MINUTES ?? "5", 10), 1), 30);
+const ADMISSION_WAIT_SECONDS = Math.min(Math.max(Number.parseInt(process.env.ADMISSION_WAIT_SECONDS ?? "120", 10), 15), 900);
 const ROUTE_MODE = process.env.CINDER_ROUTES ?? "both";
 const LIVEKIT_URL = process.env.LIVEKIT_URL ?? "";
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY ?? "";
@@ -114,7 +115,18 @@ function createMediaToken(encryptedAlias: string, identity: string) {
     nbf: now - 5,
     exp: now + 5 * 60,
     metadata: encryptedAlias,
-    video: { room: roomId, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false },
+    video: {
+      room: roomId,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: false,
+      // Least privilege: only the sources the room UI actually uses. The single-presenter
+      // lock (media:present:start) is cooperative coordination between clients, not a
+      // LiveKit permission — grants are fixed when the token is minted, before anyone asks
+      // to present. Screen share stays in this list so a granted presenter can publish.
+      canPublishSources: ["CAMERA", "MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"],
+    },
   });
   const unsigned = `${header}.${payload}`;
   return `${unsigned}.${createHmac("sha256", LIVEKIT_API_SECRET).update(unsigned).digest("base64url")}`;
@@ -168,16 +180,6 @@ app.use((_request, response, next) => {
   response.setHeader("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(), payment=(), usb=()");
   response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
   next();
-});
-
-function isLocalRequest(request: Request) {
-  const host = request.hostname.toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
-}
-
-app.get("/api/session", (request, response) => {
-  if (!isLocalRequest(request)) return response.status(403).json({ error: "Open the local host link to fetch a fresh session." });
-  return response.json({ roomId, ownerToken, routes });
 });
 
 app.get("/api/health", (_request, response) => response.json({
@@ -343,6 +345,10 @@ io.on("connection", (socket) => {
   let meetingWindowStarted = Date.now();
   let screenChunksInWindow = 0;
   let screenWindowStarted = Date.now();
+  // An undecided guest still occupies a participant slot, so the wait is bounded.
+  // Without this, opening MAX_PARTICIPANTS sockets and never being decided on
+  // fills the room permanently.
+  let waitTimeout: NodeJS.Timeout | null = null;
   socket.on("room:join", (payload: { encryptedAlias?: unknown; ownerToken?: unknown }) => {
     clearTimeout(joinTimeout);
     if (!isBase64Url(payload?.encryptedAlias, 2048)) return socket.emit("room:error", "Invalid encrypted alias.");
@@ -350,10 +356,20 @@ io.on("connection", (socket) => {
     if (isOwner) ownerSockets.add(socket.id);
     if (admissionLocked && !isOwner) {
       pendingAliases.set(socket.id, payload.encryptedAlias as string);
+      if (waitTimeout) clearTimeout(waitTimeout);
+      waitTimeout = setTimeout(() => {
+        if (!pendingAliases.has(socket.id)) return;
+        pendingAliases.delete(socket.id);
+        socket.emit("moderation:command", { command: "remove", reason: "The host did not answer this request in time." });
+        socket.disconnect(true);
+        emitPending();
+      }, ADMISSION_WAIT_SECONDS * 1000);
+      waitTimeout.unref();
       socket.emit("admission:waiting");
       emitPending();
       return;
     }
+    if (waitTimeout) { clearTimeout(waitTimeout); waitTimeout = null; }
     admit(socket, payload.encryptedAlias as string);
   });
 
@@ -470,6 +486,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    clearTimeout(joinTimeout);
+    if (waitTimeout) { clearTimeout(waitTimeout); waitTimeout = null; }
     if (activeScreen?.presenterSocketId === socket.id) stopActiveScreen("disconnected");
     if (activeMediaPresenter === socket.id) activeMediaPresenter = null;
     aliases.delete(socket.id);

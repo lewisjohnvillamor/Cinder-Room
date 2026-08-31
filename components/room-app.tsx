@@ -1120,8 +1120,15 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
     }
   }
 
+  // The relay is the authority here: it accepts a delete from the uploader's own
+  // capability or from the host token. Mirror both, so the host is not locked out
+  // of moderating a file someone else uploaded.
+  function canDeleteFile(item: SharedFile) {
+    return Boolean(ownerToken) || item.sender === ownName;
+  }
+
   function deleteFile(item: SharedFile) {
-    if (!roomId || item.sender !== ownName) return;
+    if (!roomId || !canDeleteFile(item)) return;
     requestConfirm({
       title: `Delete ${item.name}?`,
       message: "This removes the encrypted file from the room for everyone.",
@@ -1433,7 +1440,7 @@ export default function RoomApp({ demo = false }: { demo?: boolean }) {
                 <div className="file-kind"><FileGlyph type={item.type} /></div>
                 <div className="file-info"><div className="file-name" title={item.name}>{item.name}</div><div className="file-meta">{formatBytes(item.size)} · {item.sender}</div></div>
                 <button className="icon-button" aria-label={`Open ${item.name}`} onClick={() => openFile(item)}>{item.type.startsWith("image/") || item.type.startsWith("video/") ? <ArrowUp size={17} /> : <DownloadSimple size={17} />}</button>
-                {item.sender === ownName ? <button className="icon-button danger-icon-button" aria-label={`Delete ${item.name}`} onClick={() => void deleteFile(item)}><Trash size={17} /></button> : null}
+                {canDeleteFile(item) ? <button className="icon-button danger-icon-button" aria-label={`Delete ${item.name}`} onClick={() => void deleteFile(item)}><Trash size={17} /></button> : null}
               </li>
             ))}
           </ul>

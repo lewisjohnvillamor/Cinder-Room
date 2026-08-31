@@ -291,6 +291,10 @@ export default function MeetingPanel({
     if (roomRef.current || connecting) return;
     setConnecting(true);
     setError("");
+    // Held separately from roomRef so a failure before the room is adopted still
+    // tears down its E2EE worker instead of leaking one per retry.
+    let pendingRoom: Room | null = null;
+    let pendingWorker: Worker | null = null;
     try {
       const response = await fetch(`/api/media-token?room=${encodeURIComponent(roomId)}`, {
         headers: { "X-Cinder-Alias": encryptedAlias, "X-Cinder-Capability": httpCapability },
@@ -300,15 +304,15 @@ export default function MeetingPanel({
 
       const keyProvider = new ExternalE2EEKeyProvider();
       const mediaKey = await deriveMediaKey(encodedKey, roomId);
+      const worker = new Worker("/e2ee-worker.js", { type: "module", name: "cinder-media-e2ee" });
+      pendingWorker = worker;
       const room = new Room({
         adaptiveStream: true,
         dynacast: true,
         videoCaptureDefaults: { resolution: VideoPresets.h720.resolution },
-        encryption: {
-          keyProvider,
-          worker: new Worker("/e2ee-worker.js", { type: "module", name: "cinder-media-e2ee" }),
-        },
+        encryption: { keyProvider, worker },
       });
+      pendingRoom = room;
 
       const update = () => { void refresh(room); };
       room
@@ -346,6 +350,8 @@ export default function MeetingPanel({
       previewStreamRef.current?.getTracks().forEach((track) => track.stop());
       previewStreamRef.current = null;
       roomRef.current = room;
+      pendingRoom = null;
+      pendingWorker = null;
       setConnected(true);
       if (intent === "audio") {
         await room.localParticipant.setMicrophoneEnabled(true, {
@@ -357,6 +363,8 @@ export default function MeetingPanel({
       }
       await refresh(room);
     } catch (reason) {
+      if (pendingRoom) void pendingRoom.disconnect().catch(() => undefined);
+      pendingWorker?.terminate();
       setError(reason instanceof Error ? reason.message : "The encrypted media connection failed.");
     } finally {
       setConnecting(false);

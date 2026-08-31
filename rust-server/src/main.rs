@@ -139,6 +139,7 @@ struct AppState {
     max_room_storage_bytes: usize,
     room_ttl_minutes: u64,
     screen_max_minutes: u64,
+    admission_wait_seconds: u64,
     livekit_url: String,
     livekit_api_key: String,
     livekit_api_secret: String,
@@ -439,12 +440,18 @@ fn create_media_token(state: &AppState, encrypted_alias: &str, identity: &str) -
             "nbf": now.saturating_sub(5),
             "exp": now + 5 * 60,
             "metadata": encrypted_alias,
+            // Least privilege: only the sources the room UI actually uses. The
+            // single-presenter lock (media:present:start) is cooperative coordination
+            // between clients, not a LiveKit permission — grants are fixed when the token
+            // is minted, before anyone asks to present. Screen share stays in this list so
+            // a granted presenter can publish.
             "video": {
                 "room": state.room_id.as_str(),
                 "roomJoin": true,
                 "canPublish": true,
                 "canSubscribe": true,
-                "canPublishData": false
+                "canPublishData": false,
+                "canPublishSources": ["CAMERA", "MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"]
             }
         }))
         .ok()?,
@@ -848,38 +855,54 @@ async fn delete_file(
     if query.room.as_deref() != Some(state.room_id.as_str()) {
         return (StatusCode::NOT_FOUND, "Room unavailable").into_response();
     }
-    let file = state.files.write().expect("files lock").remove(&id);
-    let Some(file) = file else {
-        return (StatusCode::NOT_FOUND, "File unavailable").into_response();
-    };
+    // Resolve authorization before touching the map. Removing first and putting the
+    // entry back on a 403 briefly hides the file from concurrent downloads.
     let is_owner = owner_token
         .as_deref()
         .is_some_and(|token| owner_matches(&state, token));
-    if !is_owner && authenticated_socket(&state, &rate_headers).is_none() {
-        state
-            .files
-            .write()
-            .expect("files lock")
-            .insert(id.clone(), file);
-        return (
-            StatusCode::FORBIDDEN,
-            "Join the encrypted room before deleting files",
-        )
-            .into_response();
-    }
+    let is_participant = authenticated_socket(&state, &rate_headers).is_some();
     let requester_capability_hash = capability_hash(&capability).unwrap_or_default();
-    if file.uploader_capability_hash != requester_capability_hash && !is_owner {
-        state
-            .files
-            .write()
-            .expect("files lock")
-            .insert(id.clone(), file);
-        return (
-            StatusCode::FORBIDDEN,
-            "Only the sender or host can delete this file.",
-        )
-            .into_response();
+
+    enum Outcome {
+        Missing,
+        NotJoined,
+        NotAllowed,
+        Deleted(StoredFile),
     }
+
+    let outcome = {
+        let mut files = state.files.write().expect("files lock");
+        match files.get(&id) {
+            None => Outcome::Missing,
+            Some(_) if !is_owner && !is_participant => Outcome::NotJoined,
+            Some(file)
+                if !is_owner && file.uploader_capability_hash != requester_capability_hash =>
+            {
+                Outcome::NotAllowed
+            }
+            Some(_) => Outcome::Deleted(files.remove(&id).expect("file present")),
+        }
+    };
+
+    let file = match outcome {
+        Outcome::Missing => return (StatusCode::NOT_FOUND, "File unavailable").into_response(),
+        Outcome::NotJoined => {
+            return (
+                StatusCode::FORBIDDEN,
+                "Join the encrypted room before deleting files",
+            )
+                .into_response();
+        }
+        Outcome::NotAllowed => {
+            return (
+                StatusCode::FORBIDDEN,
+                "Only the sender or host can delete this file.",
+            )
+                .into_response();
+        }
+        Outcome::Deleted(file) => file,
+    };
+
     let _ = tokio::fs::remove_file(file.path).await;
     state
         .stored_ciphertext_bytes
@@ -1207,6 +1230,35 @@ fn configure_socket_io(io: &SocketIo, state: Arc<AppState>) {
                                     .insert(socket.id.to_string(), payload.encrypted_alias);
                                 socket.emit("admission:waiting", &()).ok();
                                 emit_pending(&state);
+                                // An undecided guest still occupies a participant slot, so the
+                                // wait is bounded. Without this, opening max_participants sockets
+                                // and never being decided on fills the room permanently.
+                                let wait_state = state.clone();
+                                let wait_socket = socket.clone();
+                                let wait_id = socket.id.to_string();
+                                let wait_seconds = state.admission_wait_seconds;
+                                tokio::spawn(async move {
+                                    sleep(Duration::from_secs(wait_seconds)).await;
+                                    let still_waiting = wait_state
+                                        .pending_aliases
+                                        .write()
+                                        .expect("pending aliases lock")
+                                        .remove(&wait_id)
+                                        .is_some();
+                                    if still_waiting {
+                                        wait_socket
+                                            .emit(
+                                                "moderation:command",
+                                                &ModerationEvent {
+                                                    command: "remove",
+                                                    reason: "The host did not answer this request in time.",
+                                                },
+                                            )
+                                            .ok();
+                                        wait_socket.disconnect().ok();
+                                        emit_pending(&wait_state);
+                                    }
+                                });
                                 return;
                             }
                             admit_socket(&state, &io, &socket, payload.encrypted_alias).await;
@@ -1909,6 +1961,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_number("MAX_ROOM_STORAGE_MB", 1_024, max_file_mb as u64, 102_400) as usize;
     let room_ttl_minutes = env_number("ROOM_TTL_MINUTES", 180, 5, 10_080);
     let screen_max_minutes = env_number("SCREEN_MAX_MINUTES", 5, 1, 30);
+    let admission_wait_seconds = env_number("ADMISSION_WAIT_SECONDS", 120, 15, 900);
     let route_mode = env::var("CINDER_ROUTES").unwrap_or_else(|_| "both".to_owned());
     let livekit_url = env::var("LIVEKIT_URL").unwrap_or_default();
     let livekit_api_key = env::var("LIVEKIT_API_KEY").unwrap_or_default();
@@ -1937,6 +1990,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_room_storage_bytes: max_room_storage_mb * 1024 * 1024,
         room_ttl_minutes,
         screen_max_minutes,
+        admission_wait_seconds,
         livekit_url,
         livekit_api_key,
         livekit_api_secret,
