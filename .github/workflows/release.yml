@@ -35,6 +35,12 @@ on:
 permissions:
   contents: read
 
+# Superseded pull-request runs are cancelled rather than left occupying scarce
+# macOS runners. Tag runs are never cancelled: each one publishes a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: ${{ matrix.label }}
@@ -51,8 +57,12 @@ jobs:
             runner: macos-14
             binary: cinder-room-relay
             asset: cinder-room-macos-arm64
+          # macos-15-intel, not macos-13: the macOS 13 image was retired in
+          # December 2025, and a job targeting it is never assigned a runner — it
+          # simply queues forever. This is the current Intel label, available
+          # until August 2027, after which GitHub drops hosted x86_64 macOS.
           - label: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             binary: cinder-room-relay
             asset: cinder-room-macos-x86_64
           - label: linux-x86_64
