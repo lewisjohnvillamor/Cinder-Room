@@ -1,0 +1,136 @@
+name: Release
+
+# Builds the single-file Cinder Room executable for each desktop platform. The room
+# UI is compiled into the binary (see rust-server/build.rs), so each artifact runs on
+# its own with nothing to unzip and no Node or Rust toolchain on the user's machine.
+#
+# Each target builds on its own native runner: the relay links against system
+# libraries, and cross-compiling macOS or Windows binaries from Linux is not
+# something this repository is set up to do.
+
+on:
+  push:
+    tags: ["v*"]
+  # Build (but never publish) on pull requests that touch what the executable is
+  # made of. The Windows and macOS binaries are otherwise only ever built at tag
+  # time, which is the worst moment to discover one of them broke.
+  pull_request:
+    paths:
+      - "rust-server/**"
+      - "server/**"
+      - "components/**"
+      - "app/globals.css"
+      - "scripts/verify-standalone.sh"
+      - "scripts/copy-room-assets.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (leave empty to build without publishing)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Superseded pull-request runs are cancelled rather than left occupying scarce
+# macOS runners. Tag runs are never cancelled: each one publishes a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x86_64
+            runner: windows-latest
+            binary: cinder-room-relay.exe
+            asset: cinder-room-windows-x86_64.exe
+          - label: macos-arm64
+            runner: macos-14
+            binary: cinder-room-relay
+            asset: cinder-room-macos-arm64
+          # macos-15-intel, not macos-13: the macOS 13 image was retired in
+          # December 2025, and a job targeting it is never assigned a runner — it
+          # simply queues forever. This is the current Intel label, available
+          # until August 2027, after which GitHub drops hosted x86_64 macOS.
+          - label: macos-x86_64
+            runner: macos-15-intel
+            binary: cinder-room-relay
+            asset: cinder-room-macos-x86_64
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            binary: cinder-room-relay
+            asset: cinder-room-linux-x86_64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      # The UI must exist before cargo build, or build.rs embeds empty assets and
+      # the binary falls back to looking for self-host-dist/ on the user's disk.
+      - run: npm ci
+      - run: npm run build:room-ui
+
+      - uses: dtolnay/rust-toolchain@1.94.0
+
+      - run: cargo build --release --locked --manifest-path rust-server/Cargo.toml
+
+      - name: Verify the binary is self-contained
+        shell: bash
+        run: bash scripts/verify-standalone.sh "rust-server/target/release/${{ matrix.binary }}"
+
+      - name: Stage the release asset
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          cp "rust-server/target/release/${{ matrix.binary }}" "dist-release/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist-release/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only attach binaries to a real tag. Pull requests and a workflow_dispatch run
+    # without a tag still build and verify every platform, they just publish nothing.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish the executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -la artifacts
+          gh release create "$TAG" \
+            --title "Cinder Room $TAG" \
+            --generate-notes \
+            --verify-tag \
+            artifacts/* \
+            || gh release upload "$TAG" artifacts/* --clobber
