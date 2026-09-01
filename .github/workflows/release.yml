@@ -11,6 +11,20 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Build (but never publish) on pull requests that touch what the executable is
+  # made of. The Windows and macOS binaries are otherwise only ever built at tag
+  # time, which is the worst moment to discover one of them broke.
+  pull_request:
+    paths:
+      - "rust-server/**"
+      - "server/**"
+      - "components/**"
+      - "app/globals.css"
+      - "scripts/verify-standalone.sh"
+      - "scripts/copy-room-assets.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -82,9 +96,11 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
-    # Only attach binaries to a real tag. A workflow_dispatch run without a tag
-    # still builds and verifies every platform, it just publishes nothing.
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    # Only attach binaries to a real tag. Pull requests and a workflow_dispatch run
+    # without a tag still build and verify every platform, they just publish nothing.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '')
     permissions:
       contents: write
     steps:
