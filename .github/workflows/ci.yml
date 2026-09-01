@@ -38,3 +38,8 @@ jobs:
       - run: cargo fmt --manifest-path rust-server/Cargo.toml -- --check
       - run: cargo clippy --locked --manifest-path rust-server/Cargo.toml --all-targets -- -D warnings
       - run: npm run test:room
+      # test:room builds the room UI, so the binary below embeds it. Checking here
+      # keeps main releasable: a change that breaks the single-file executable
+      # fails on the PR instead of at tag time.
+      - run: cargo build --locked --manifest-path rust-server/Cargo.toml
+      - run: bash scripts/verify-standalone.sh rust-server/target/debug/cinder-room-relay

@@ -39,6 +39,45 @@ For sensitive secret sharing, verify the recipient through a separate trusted ch
 
 “Encrypted” does not mean that nobody can listen under every circumstance. Cinder protects message and media content from ordinary relay, tunnel, and network observation when the software and participant devices are trustworthy. It cannot prevent an invited participant from copying or recording content, someone with the complete invitation from joining, malware or browser extensions from reading the screen, or infrastructure providers from observing connection metadata, timing, and approximate traffic sizes. See [Privacy and threat model](#privacy-and-threat-model) for the full limits.
 
+## Download a ready-to-run executable
+
+The quickest way to host a room: one file, no Node, no Rust, nothing to install. The
+browser client is compiled into the executable, so there is no folder to keep beside
+it. Grab your platform's build from the [latest release](https://github.com/lewisjohnvillamor/Cinder-Room/releases/latest):
+
+| Platform | File |
+| --- | --- |
+| Windows (64-bit) | `cinder-room-windows-x86_64.exe` |
+| macOS (Apple Silicon) | `cinder-room-macos-arm64` |
+| macOS (Intel) | `cinder-room-macos-x86_64` |
+| Linux (64-bit) | `cinder-room-linux-x86_64` |
+
+Run it and Cinder starts a room, prints the private host link, and opens it in your
+default browser. Press Ctrl+C to end the room and delete its temporary data. Set
+`CINDER_OPEN_BROWSER=false` to keep the terminal the only entry point.
+
+On macOS and Linux, mark the download executable first:
+
+```bash
+chmod +x cinder-room-macos-arm64
+./cinder-room-macos-arm64
+```
+
+**The builds are unsigned**, so both desktop platforms will warn on first launch:
+
+- **macOS** reports that the developer cannot be verified. Open Finder, right-click
+  the file, choose **Open**, then confirm — or clear the quarantine flag with
+  `xattr -d com.apple.quarantine cinder-room-macos-arm64`.
+- **Windows** shows a SmartScreen prompt. Choose **More info → Run anyway**.
+
+Signing them requires an Apple Developer certificate and a Windows code-signing
+certificate, neither of which this project has. Build from source if you would
+rather not bypass those prompts.
+
+Tunnel routes still need their own helpers: install `tor` or `cloudflared` to share a
+room beyond your own machine, or run with `CINDER_ROUTES=local` for a local-only room.
+Group video still needs a reachable LiveKit endpoint.
+
 ## Start locally
 
 Requirements: Node.js 22.13+, npm, and Rust 1.94. Optional route helpers are `tor` and `cloudflared`; Cinder can download `cloudflared` automatically on first start when `CINDER_ROUTES` includes Cloudflare. Optional native group media uses `livekit-server`.
@@ -194,6 +233,7 @@ Copy `.env.example` to `.env` or export variables before starting:
 | `MAX_ROOM_STORAGE_MB` | `1024` | Total ciphertext storage |
 | `SCREEN_MAX_MINUTES` | `5` | Fallback presentation duration |
 | `ADMISSION_WAIT_SECONDS` | `120` | How long an undecided guest may hold a slot in the waiting room |
+| `CINDER_OPEN_BROWSER` | `true` | Open the host link automatically on start; `false` keeps the terminal the only entry point |
 | `LIVEKIT_URL` | empty | Public `wss://` media endpoint |
 | `LIVEKIT_API_KEY` | generated/empty | LiveKit token issuer key |
 | `LIVEKIT_API_SECRET` | generated/empty | LiveKit signing secret |
@@ -213,9 +253,30 @@ npm run test:room:node     # TypeScript compatibility relay
 npm run test:room:bundled  # Production-style bundled Node fallback
 ```
 
+### Building the standalone executable
+
+The room UI is embedded at compile time, so it must be built *before* the relay:
+
+```bash
+npm ci
+npm run build:room-ui
+cargo build --release --locked --manifest-path rust-server/Cargo.toml
+bash scripts/verify-standalone.sh rust-server/target/release/cinder-room-relay
+```
+
+`verify-standalone.sh` runs the binary alone in an empty directory and fails if the
+UI does not come back over HTTP. Skipping `build:room-ui` produces a binary that
+looks fine locally — it falls back to reading `self-host-dist/` from the working
+directory — but serves a blank page anywhere else, which is what that check catches.
+
+Publishing is handled by `.github/workflows/release.yml`: push a `v*` tag and it
+builds all four platforms on native runners, verifies each one, and attaches them to
+a GitHub Release. Use its **Run workflow** button to build without publishing.
+
 Important source areas:
 
 - `rust-server/` — default Axum/Socketioxide relay
+- `rust-server/build.rs` — embeds the built room UI into the binary
 - `server/index.ts` — Node/Express/Socket.IO compatibility relay
 - `server/client-entry.tsx` and `components/` — encrypted room UI
 - `deploy/digitalocean/` — Cinder + LiveKit + Caddy deployment

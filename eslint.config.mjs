@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Cargo's build directory. build.rs stages the minified room UI into OUT_DIR
+    // to embed it in the relay binary, and those copies are not ours to lint.
+    "rust-server/target/**",
   ]),
 ]);
 

@@ -44,6 +44,7 @@ next-env.d.ts
 /outputs/
 /work/
 /rust-server/target/
+/dist-release/
 /self-host-dist/
 /.cinder-bin/
 *.tsbuildinfo
