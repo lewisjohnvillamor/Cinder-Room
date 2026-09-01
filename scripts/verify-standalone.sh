@@ -18,8 +18,20 @@ cp "$binary" "$workdir/"
 name="$(basename "$binary")"
 
 cleanup() {
-  [[ -n "${relay_pid:-}" ]] && kill "$relay_pid" 2>/dev/null || true
-  rm -rf "$workdir"
+  # Capture the real result first: this runs on every exit, and without the
+  # explicit exit below a failure while tidying up would replace the verdict.
+  # That is not hypothetical — on Windows the killed relay keeps its directory
+  # busy for a moment, so rm failed and turned a passing run into a red job.
+  local status=$?
+  if [[ -n "${relay_pid:-}" ]]; then
+    kill "$relay_pid" 2>/dev/null || true
+    wait "$relay_pid" 2>/dev/null || true
+  fi
+  for _ in $(seq 1 10); do
+    rm -rf "$workdir" 2>/dev/null && break
+    sleep 0.5
+  done
+  exit "$status"
 }
 trap cleanup EXIT
 
